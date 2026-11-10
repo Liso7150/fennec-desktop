@@ -82,15 +82,38 @@ function runtimePaths(config, { platform = process.platform, exists = fs.existsS
   return { runtime: exists(cli) && exists(server) ? runtime : null, cli, server };
 }
 
-function engineEnvironment(config, env = process.env) {
+const VULKAN_LINUX = [
+  '/usr/lib/x86_64-linux-gnu/libvulkan.so.1', '/usr/lib64/libvulkan.so.1', '/usr/lib/libvulkan.so.1',
+];
+
+/**
+ * A Vulkan loader on disk is what makes COLI_VULKAN=1 startable.
+ *
+ * `coli serve` reports "COLI_VULKAN is not set: the Vulkan device stays unused",
+ * so `auto` used to run CPU + RAM + SSD with an idle GPU. Asking for Vulkan when
+ * the loader exists lets its --auto-tier plan keep the experts on the GPU, the
+ * host RAM pool and the SSD stream at once.
+ */
+function hasVulkanLoader({ platform = process.platform, exists = fs.existsSync, env = process.env } = {}) {
+  if (platform === 'darwin') return false;
+  if (platform === 'win32') {
+    const root = env.SystemRoot || env.SYSTEMROOT || 'C:\\Windows';
+    return exists(path.win32.join(root, 'System32', 'vulkan-1.dll'));
+  }
+  return VULKAN_LINUX.some((candidate) => exists(candidate));
+}
+
+function engineEnvironment(config, env = process.env, { platform = process.platform, exists = fs.existsSync } = {}) {
   const next = { ...env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' };
   for (const key of ['FENNEC_APP_TOKEN', 'FENNEC_API_KEY', 'COLI_API_KEY',
     'COLI_VULKAN', 'COLI_METAL', 'COLI_CUDA', 'COLI_VK_DEV2']) delete next[key];
-  // serve has no --backend flag; auto delegates detection to coli.
-  if (config.backend !== 'auto') {
+  // serve has no --backend flag, so an explicit choice is pinned through the env.
+  if (config.backend === 'auto') {
+    if (hasVulkanLoader({ platform, exists, env })) next.COLI_VULKAN = '1';
+  } else {
     Object.assign(next, { COLI_VULKAN: '0', COLI_METAL: '0', COLI_CUDA: '0' });
     if (config.backend !== 'cpu') next[`COLI_${config.backend.toUpperCase()}`] = '1';
   }
   return next;
 }
-module.exports = { loadConfig, runtimePaths, engineEnvironment, isLoopback, INSTALLER_URL };
+module.exports = { loadConfig, runtimePaths, engineEnvironment, hasVulkanLoader, isLoopback, INSTALLER_URL };

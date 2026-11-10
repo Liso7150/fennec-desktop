@@ -112,12 +112,28 @@ test('engineEnvironment scrubs inherited backend switches', () => {
     PATH: '/usr/bin', COLI_CUDA: '1', COLI_VULKAN: '1', COLI_METAL: '1', COLI_VK_DEV2: '1',
     FENNEC_API_KEY: 'secret', COLI_API_KEY: 'secret',
   };
-  const auto = engineEnvironment({ backend: 'auto' }, inherited);
+  const auto = engineEnvironment({ backend: 'auto' }, inherited, { platform: 'linux', exists: () => false });
   for (const key of ['COLI_CUDA', 'COLI_VULKAN', 'COLI_METAL', 'COLI_VK_DEV2', 'FENNEC_API_KEY', 'COLI_API_KEY']) {
     assert.ok(!(key in auto), `${key} should be scrubbed in auto mode`);
   }
   assert.strictEqual(auto.PATH, '/usr/bin');
   assert.strictEqual(auto.PYTHONIOENCODING, 'utf-8');
+});
+
+test('auto asks for the GPU tier when a Vulkan loader exists', () => {
+  const win = engineEnvironment({ backend: 'auto' }, { SystemRoot: 'C:\\Windows' },
+    { platform: 'win32', exists: (p) => p === 'C:\\Windows\\System32\\vulkan-1.dll' });
+  assert.strictEqual(win.COLI_VULKAN, '1');
+
+  const absent = engineEnvironment({ backend: 'auto' }, {}, { platform: 'win32', exists: () => false });
+  assert.ok(!('COLI_VULKAN' in absent), 'no loader on the box: leave the engine CPU-only');
+
+  const linux = engineEnvironment({ backend: 'auto' }, {},
+    { platform: 'linux', exists: (p) => p === '/usr/lib/x86_64-linux-gnu/libvulkan.so.1' });
+  assert.strictEqual(linux.COLI_VULKAN, '1');
+
+  const mac = engineEnvironment({ backend: 'auto' }, {}, { platform: 'darwin', exists: () => true });
+  assert.ok(!('COLI_VULKAN' in mac), 'Metal is not requested from the auto path');
 });
 
 test('engineEnvironment pins an explicit backend and clears the rest', () => {
