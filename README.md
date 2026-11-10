@@ -11,9 +11,9 @@ models, with device-tiered MoE inference. Electron + React + Vite.
 - **Vision** — attach one PNG/JPEG/WebP/GIF (or paste it) and it is sent as a base64 content part to the local engine.
 - **File attachments** — attach up to three text files as bounded context instead of pasting them.
 - **Speech** — dictate with the local faster-whisper sidecar and read answers aloud with the system voices.
-- **Update from GitHub** — check the latest release, open it, and fast-forward the suite checkouts with `git pull --ff-only`.
+- **Update from GitHub** — the release feed is checked at startup, on window focus and when an engine starts (cached, silent when offline); `Check release` re-queries it and `Update apps from GitHub` fast-forwards the suite checkouts with `git pull --ff-only`.
 - **Path-jailed tools** — file reads, edits, grep and command runs stay inside the opened workspace.
-- **NPU embeddings** — optional Intel NPU sidecar for semantic search (never a decoder).
+- **NPU & accelerator sidecar** — OpenVINO device probe plus the batched workspace code index, off the token path (never a decoder). The app picks the first interpreter that can import OpenVINO — the shared venv when it exists, otherwise a plain `python` from PATH — and *Install sidecar deps* / *Install embedding model* provision exactly what is missing: pip for `openvino`, `openvino-tokenizers` and `numpy`, then a prebuilt OpenVINO IR embedding model fetched with `huggingface_hub`. No `optimum-cli` export step, so torch/nncf never enter that interpreter. The index file it writes is not consulted by the agent yet: retrieval is still keyword/grep.
 - **Cross-platform builds** — NSIS/MSI, dmg, AppImage/deb, with a Windows/macOS/Linux CI matrix.
 - **Local-only** — models, caches, logs and settings never leave this device.
 

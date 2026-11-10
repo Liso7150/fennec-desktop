@@ -94,7 +94,15 @@ export interface ProbeResult {
 
 export interface AcceleratorStatus {
   python: string;
+  pythonChecked?: string[];
+  deps?: Record<string, string | null> | null;
+  missingDeps?: string[];
+  packages?: string[];
+  modelPackages?: string[];
   embedModel: string | null;
+  embedTarget?: string | null;
+  embedModelId?: string;
+  embedIrRepo?: string;
   lastProbe: ProbeResult | null;
   note?: string;
 }
@@ -149,7 +157,28 @@ declare global {
           files?: number;
           chunks?: number;
           device_ms?: number;
+          passes?: number;
+          mode?: string;
+          tokenizer?: boolean;
+          embedding_shape?: number[];
           index?: string;
+          error?: string | null;
+        }>;
+        ensure: (options?: { includeModelTooling?: boolean }) => Promise<{
+          ok: boolean;
+          code?: number;
+          output?: string;
+          python?: string;
+          mode?: string;
+          packages?: string[];
+          ready?: boolean;
+          error?: string;
+        }>;
+        fetchModel: () => Promise<{
+          ok: boolean;
+          repo?: string;
+          dest?: string;
+          model?: string | null;
           error?: string;
         }>;
       };
@@ -181,6 +210,7 @@ declare global {
           results: { repo: string; ok: boolean; output: string }[];
         }>;
         open: (url: string) => Promise<boolean>;
+        onInfo: (cb: (info: UpdateInfo) => void) => void;
       };
     };
   }
@@ -197,13 +227,15 @@ export interface ChatPayloadMessage {
 
 export interface UpdateInfo {
   ok?: boolean;
-  current: string;
-  latest: string;
-  upToDate: boolean;
-  url: string;
-  name: string;
-  notes: string;
-  published: string | null;
+  current?: string;
+  latest?: string;
+  upToDate?: boolean;
+  available?: boolean;
+  url?: string;
+  name?: string;
+  notes?: string;
+  published?: string | null;
+  checkedAt?: number | null;
   error?: string;
 }
 

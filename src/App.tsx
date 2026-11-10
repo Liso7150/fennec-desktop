@@ -63,6 +63,8 @@ export default function App() {
 
     window.colibri.agent.onEvent((event) => handleEvent(event));
     window.colibri.agent.onApproval((req) => setApproval(req));
+    // The main process checks the release feed at startup and on use.
+    window.colibri.updates.onInfo((info) => setUpdateInfo(info));
   }, []);
 
   useEffect(() => {
@@ -349,6 +351,16 @@ export default function App() {
 
         <div className="spacer" />
 
+        {updateInfo?.available && (
+          <button
+            className="btn ghost"
+            title={`${updateInfo.notes || 'Release notes on GitHub'}`}
+            onClick={() => void window.colibri.updates.open(updateInfo.url || 'https://github.com/Liso7150/colibri-code/releases')}
+          >
+            {updateInfo.latest} available
+          </button>
+        )}
+
         <span className={`pill pill-${status.tone}`}>
           <span className="dot" />
           {status.label}
@@ -583,7 +595,12 @@ export default function App() {
                           <strong>{updateInfo.latest}</strong> is available — you have {updateInfo.current}.
                         </div>
                         {updateInfo.notes && <pre className="update-notes">{updateInfo.notes}</pre>}
-                        <button className="link-btn" onClick={() => void window.colibri.updates.open(updateInfo.url)}>
+                        <button
+                          className="link-btn"
+                          onClick={() => void window.colibri.updates.open(
+                            updateInfo.url || 'https://github.com/Liso7150/colibri-code/releases',
+                          )}
+                        >
                           Open the release page
                         </button>
                       </>

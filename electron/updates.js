@@ -19,6 +19,19 @@ function gitPull(dir, timeout = 120000) {
   });
 }
 
+/** Numeric compare so a newer local build is never told it is behind. */
+function compareVersions(left, right) {
+  const parts = (value) => String(value || '').replace(/^v/, '').split(/[.-]/)
+    .map((bit) => Number.parseInt(bit, 10)).map((bit) => (Number.isFinite(bit) ? bit : 0));
+  const length = Math.max(parts(left).length, parts(right).length);
+  const a = parts(left).concat(Array(length).fill(0)).slice(0, length);
+  const b = parts(right).concat(Array(length).fill(0)).slice(0, length);
+  for (let i = 0; i < length; i += 1) {
+    if (a[i] !== b[i]) return a[i] > b[i] ? 1 : -1;
+  }
+  return 0;
+}
+
 async function checkDesktop(current) {
   let res;
   try {
@@ -32,15 +45,44 @@ async function checkDesktop(current) {
   if (!res.ok) throw new Error(`GitHub API returned HTTP ${res.status}`);
   const data = await res.json();
   const latest = String(data.tag_name || '').replace(/^v/, '');
+  const available = Boolean(latest) && compareVersions(latest, current) > 0;
   return {
     current,
     latest,
-    upToDate: Boolean(latest) && latest === current,
+    available,
+    upToDate: !available,
     url: data.html_url || `https://github.com/${DESKTOP_REPO}/releases`,
     name: data.name || latest,
     notes: String(data.body || '').slice(0, 1200),
     published: data.published_at || null,
   };
+}
+
+const state = { at: 0, info: null, error: null };
+
+function snapshot() {
+  return state.info
+    ? { ok: true, ...state.info, checkedAt: state.at }
+    : { ok: false, error: state.error || 'no update check has run', checkedAt: state.at || null };
+}
+
+/**
+ * Cached release check: the app calls it at startup and on use, so repeated
+ * opens of the settings panel do not hit the GitHub API again. Failures are
+ * remembered and retried on the next call — offline startup must stay quiet.
+ */
+async function refreshDesktop(current, { force = false, maxAgeMs = 6 * 60 * 60 * 1000, errorMaxAgeMs = 10 * 60 * 1000 } = {}) {
+  const age = state.at ? Date.now() - state.at : Infinity;
+  if (!force && age < (state.info ? maxAgeMs : errorMaxAgeMs)) return snapshot();
+  try {
+    state.info = await checkDesktop(current);
+    state.error = null;
+  } catch (err) {
+    state.info = null;
+    state.error = err.message;
+  }
+  state.at = Date.now();
+  return snapshot();
 }
 
 async function updateSuite(suiteRoot) {
@@ -66,4 +108,4 @@ async function updateSuite(suiteRoot) {
   return { ok: results.every((row) => row.ok), results };
 }
 
-module.exports = { checkDesktop, updateSuite };
+module.exports = { checkDesktop, compareVersions, refreshDesktop, updateSnapshot: snapshot, updateSuite };

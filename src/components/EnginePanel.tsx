@@ -37,6 +37,8 @@ export default function EnginePanel({ backend, models, settings, onRefreshModels
   const [probeBusy, setProbeBusy] = useState(false);
   const [indexBusy, setIndexBusy] = useState(false);
   const [indexMsg, setIndexMsg] = useState('');
+  const [depsBusy, setDepsBusy] = useState(false);
+  const [depsMsg, setDepsMsg] = useState('');
 
   useEffect(() => {
     if (settings.modelDir) setSelected(settings.modelDir);
@@ -64,11 +66,41 @@ export default function EnginePanel({ backend, models, settings, onRefreshModels
       const res = await window.colibri.npu.index(settings.npuDevice || 'NPU');
       setIndexMsg(
         res.ok
-          ? `indexed ${res.files} files / ${res.chunks} chunks on ${res.device} in ${res.device_ms} ms`
+          ? `${res.files} files / ${res.chunks} chunks indexed · ${res.passes} model passes on `
+            + `${res.device} at ${res.device_ms} ms each (${res.mode}${res.tokenizer ? '' : ', no tokenizer wired'})`
           : res.error || 'index failed',
       );
     } finally {
       setIndexBusy(false);
+    }
+  };
+
+  const installDeps = async () => {
+    setDepsBusy(true);
+    setDepsMsg('Installing with pip — this can take a few minutes…');
+    try {
+      const res = await window.colibri.npu.ensure();
+      const ready = res.ready ? ' (sidecar ready)' : ' (still not importable)';
+      setDepsMsg(res.ok
+        ? `${(res.packages || []).join(', ')} → ${res.python}${ready}`
+        : `pip failed: ${res.output || res.error || 'unknown error'}`);
+      setAccel(await window.colibri.npu.status());
+    } finally {
+      setDepsBusy(false);
+    }
+  };
+
+  const installModel = async () => {
+    setDepsBusy(true);
+    setDepsMsg('Downloading the OpenVINO IR embedding model…');
+    try {
+      const res = await window.colibri.npu.fetchModel();
+      setDepsMsg(res.ok
+        ? `embedding model at ${res.model || res.dest}`
+        : `download failed: ${res.error || 'unknown error'}`);
+      setAccel(await window.colibri.npu.status());
+    } finally {
+      setDepsBusy(false);
     }
   };
 
@@ -239,10 +271,27 @@ export default function EnginePanel({ backend, models, settings, onRefreshModels
           </div>
         )}
         <div className="kv">
-          <span>openvino on</span>
-          <code>{accel?.python || 'python not found'}</code>
+          <span>sidecar python</span>
+          <code>{accel?.python || 'not found'}</code>
+          <span>openvino</span>
+          <code>{accel?.deps?.openvino || (accel?.missingDeps?.length ? 'missing' : 'not checked')}</code>
           <span>embedding model</span>
-          <code>{accel?.embedModel || 'not installed (index falls back to text only)'}</code>
+          <code>{accel?.embedModel || `not installed (looked in ${accel?.embedTarget || 'models_root/embed'})`}</code>
+        </div>
+        <div className="row gap">
+          <button className="btn" onClick={() => void installDeps()} disabled={depsBusy || settings.npuEnabled === false}>
+            {depsBusy ? 'Working…' : 'Install sidecar deps'}
+          </button>
+          <button className="btn" onClick={() => void installModel()} disabled={depsBusy || settings.npuEnabled === false}>
+            Install embedding model
+          </button>
+        </div>
+        {depsMsg && <div className="muted tiny">{depsMsg}</div>}
+        <div className="muted tiny">
+          {(accel?.packages || []).join(', ')} are pip-installed into whichever interpreter answers — the shared
+          venv when it exists, otherwise the plain <code>python</code> from PATH. The model is the prebuilt IR
+          build of <code>{accel?.embedModelId}</code> (<code>{accel?.embedIrRepo}</code>), downloaded with
+          huggingface_hub; no exporter, and nothing pulls torch into that interpreter.
         </div>
         {accel?.note && <p className="muted tiny">{accel.note}</p>}
       </section>

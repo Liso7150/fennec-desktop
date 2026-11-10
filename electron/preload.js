@@ -29,6 +29,8 @@ contextBridge.exposeInMainWorld('colibri', {
     status: () => ipcRenderer.invoke('npu:status'),
     probe: () => ipcRenderer.invoke('npu:probe'),
     index: (device) => ipcRenderer.invoke('npu:index', device),
+    ensure: (options) => ipcRenderer.invoke('npu:ensure', options),
+    fetchModel: () => ipcRenderer.invoke('npu:model'),
   },
   agent: {
     send: (payload) => ipcRenderer.invoke('agent:send', payload),
@@ -44,5 +46,6 @@ contextBridge.exposeInMainWorld('colibri', {
     check: () => ipcRenderer.invoke('update:check'),
     apply: () => ipcRenderer.invoke('update:apps'),
     open: (url) => ipcRenderer.invoke('update:open', url),
+    onInfo: (cb) => ipcRenderer.on('update:info', (_e, data) => cb(data)),
   },
 });

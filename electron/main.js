@@ -10,7 +10,7 @@ const { resolveInside } = require('./tools');
 const { safeExternalUrl } = require('./security');
 const { INSTALLER_URL } = require('./config');
 const { SpeechToText } = require('./stt');
-const { checkDesktop, updateSuite } = require('./updates');
+const { checkDesktop, refreshDesktop, updateSnapshot, updateSuite } = require('./updates');
 
 const isDev = process.env.ELECTRON_DEV === '1';
 const backend = new ColibriBackend();
@@ -110,6 +110,18 @@ function send(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 }
 
+/**
+ * Release feed check. Runs at startup and again when the window is focused or
+ * an engine starts; updates.js caches the answer, so this stays one API call
+ * per refresh window and never blocks or nags when GitHub is unreachable.
+ */
+function refreshUpdateInfo(options) {
+  return refreshDesktop(app.getVersion(), options).then((info) => {
+    send('update:info', info);
+    return info;
+  });
+}
+
 function buildSystemPrompt(workspace, extraContext) {
   const parts = [
     'You are Colibri Code, a coding agent running entirely on the user\'s own machine.',
@@ -195,6 +207,7 @@ ipcMain.handle('engine:describe', () => backend.describe());
 
 ipcMain.handle('engine:start', async (_e, { modelDir, port, kvSlots }) => {
   const settings = saveSettings({ modelDir, port, kvSlots });
+  void refreshUpdateInfo(); // "on use" check: cheap while the engine loads.
   try {
     const described = await backend.start(modelDir, { port, kvSlots, maxTokens: settings.maxTokens });
     return { ok: true, backend: described, settings };
@@ -216,11 +229,21 @@ ipcMain.handle('engine:log', () => backend.tailLog(200));
 ipcMain.handle('engine:doctor', async (_e, modelDir) => backend.doctor(modelDir));
 
 /* accelerator sidecar: NPU / iGPU host probe + code index, never token decode */
+const sidecarOff = () => ({ ok: false, error: 'Sidecar is disabled — tick "Keep the NPU available for sidecar work".' });
 ipcMain.handle('npu:status', () => accelerator.status());
-ipcMain.handle('npu:probe', async () => accelerator.probe());
+ipcMain.handle('npu:probe', async () => (loadSettings().npuEnabled === false ? sidecarOff() : accelerator.probe()));
 ipcMain.handle('npu:index', async (_e, device) => {
+  if (loadSettings().npuEnabled === false) return sidecarOff();
   const { workspace } = loadSettings();
   return accelerator.index(workspace, device || loadSettings().npuDevice || 'NPU');
+});
+ipcMain.handle('npu:ensure', async (_e, options) => {
+  if (loadSettings().npuEnabled === false) return sidecarOff();
+  return accelerator.install({ includeModelTooling: Boolean(options && options.includeModelTooling) });
+});
+ipcMain.handle('npu:model', async () => {
+  if (loadSettings().npuEnabled === false) return sidecarOff();
+  return accelerator.fetchEmbedModel();
 });
 
 ipcMain.handle('file:read', async (_e, rel) => {
@@ -334,13 +357,7 @@ ipcMain.handle('stt:transcribe', async (_e, { audio, type }) => {
   }
 });
 
-ipcMain.handle('update:check', async () => {
-  try {
-    return { ok: true, ...(await checkDesktop(app.getVersion())) };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
+ipcMain.handle('update:check', async () => refreshUpdateInfo({ force: true }));
 
 ipcMain.handle('update:apps', async () => {
   try {
@@ -392,6 +409,10 @@ app.whenReady().then(async () => {
   ]));
   await backend.attach(); // Probe only; opening the app never loads a model.
   createWindow();
+  void refreshUpdateInfo(); // startup check, silent and cached
+  const timer = setInterval(() => void refreshUpdateInfo(), 6 * 60 * 60 * 1000);
+  if (typeof timer.unref === 'function') timer.unref();
+  win.on('focus', () => void refreshUpdateInfo());
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
