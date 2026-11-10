@@ -20,10 +20,15 @@ test('portable defaults live under the user home when D: roots are absent', () =
   assert.strictEqual(config.api_key, 'local');
 });
 
-test('windows drive roots win when they exist', () => {
-  const config = loadConfig({ env: {}, home: 'C:/Users/dev', platform: 'win32', exists: (p) => p === 'D:/Colibri' });
-  assert.strictEqual(config.engine_root, path.win32.resolve('D:/Colibri'));
-  assert.strictEqual(config.suite_root, path.win32.join('C:/Users/dev', 'Fennec-Suite'));
+test('a D: drive is never assumed, saved roots win instead', () => {
+  const portable = loadConfig({ env: {}, home: 'C:/Users/dev', platform: 'win32', exists: (p) => p === 'D:/Colibri' });
+  assert.strictEqual(portable.engine_root, path.win32.join('C:/Users/dev', 'Colibri'));
+  const saved = loadConfig({
+    env: { FENNEC_CONFIG: 'C:/cfg/fennec.json' }, platform: 'win32', home: 'C:/Users/dev',
+    exists: (p) => p === path.win32.resolve('C:/cfg/fennec.json'),
+    readFile: readJson({ engine_root: 'E:/Apps/Colibri' }),
+  });
+  assert.strictEqual(saved.engine_root, path.win32.resolve('E:/Apps/Colibri'));
 });
 
 test('environment variables override saved configuration', () => {

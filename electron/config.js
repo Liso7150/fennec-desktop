@@ -24,12 +24,11 @@ function loadConfig({ env = process.env, home = os.homedir(), platform = process
   if (Object.keys(data).some((k) => /^(api_key|app_token|token|fennec_api_key|fennec_app_token|coli_api_key)$/i.test(k))) {
     throw new Error('Keep secrets in FENNEC_API_KEY, not configuration JSON');
   }
-  const fallback = (windows, portable) => platform === 'win32' && exists(windows) ? windows : p.join(home, portable);
   const values = {
-    engine_root: fallback('D:/Colibri', 'Colibri'),
-    suite_root: fallback('D:/Fennec-Suite', 'Fennec-Suite'),
-    models_root: fallback('D:/fennec-models', 'fennec-models'),
-    cache_root: fallback('D:/.cache', '.cache/fennec'),
+    engine_root: p.join(home, 'Colibri'),
+    suite_root: p.join(home, 'Fennec-Suite'),
+    models_root: p.join(home, 'fennec-models'),
+    cache_root: p.join(home, '.cache', 'fennec'),
     model: '', engine_url: 'http://127.0.0.1:8184', backend: 'auto', ctx: 0, policy: 'quality',
   };
   for (const key of [...Object.keys(values), 'python', 'workspace', 'web_root']) {
