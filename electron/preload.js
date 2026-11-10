@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('fennec', {
     describe: () => ipcRenderer.invoke('engine:describe'),
     start: (opts) => ipcRenderer.invoke('engine:start', opts),
     stop: () => ipcRenderer.invoke('engine:stop'),
+    cleanupOrphans: () => ipcRenderer.invoke('engine:cleanupOrphans'),
     stats: () => ipcRenderer.invoke('engine:stats'),
     log: () => ipcRenderer.invoke('engine:log'),
     doctor: (modelDir) => ipcRenderer.invoke('engine:doctor', modelDir),

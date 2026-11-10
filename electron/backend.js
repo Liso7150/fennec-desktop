@@ -113,6 +113,32 @@ function serveArgs(config, modelDir, { kvSlots = 1, maxTokens = 4096 } = {}) {
     '--port', String(config.port), '--api-key', config.api_key, '--kv-slots', String(kvSlots), '--ngen', String(maxTokens)];
 }
 
+/** List engine (qwen36.exe) processes that outlived their owner on Windows.
+ *  Used to clean up orphans the process tree could not reach. */
+function listOrphanEnginePids(startedAt = 0, { platform = process.platform, exec = execFile } = {}) {
+  if (platform !== 'win32') return Promise.resolve([]);
+  const since = startedAt ? new Date(startedAt).toISOString().replace('T', ' ').replace('Z', '') : null;
+  const filter = since ? `Where-Object { $_.CreationDate -gt [DateTime]::Parse('${since}') } | ` : '';
+  const ps = `Get-CimInstance Win32_Process -Filter "Name='qwen36.exe'" | ${filter}Select-Object -ExpandProperty ProcessId`;
+  return new Promise((resolve) => {
+    exec('powershell', ['-NoProfile', '-Command', ps], { windowsHide: true, timeout: 15000 }, (err, stdout) => {
+      if (err) return resolve([]);
+      const pids = (stdout || '').split(/\s+/).map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
+      resolve([...new Set(pids)]);
+    });
+  });
+}
+
+async function killOrphanEnginePids(pids, { platform = process.platform, exec = execFile } = {}) {
+  if (platform !== 'win32') return 0;
+  let killed = 0;
+  for (const pid of pids) {
+    await new Promise((resolve) => exec('taskkill', ['/PID', String(pid), '/T', '/F'],
+      { windowsHide: true, timeout: 15000 }, (err) => { if (!err) killed += 1; resolve(); }));
+  }
+  return killed;
+}
+
 /** Never use coli stop/pidfiles: those may belong to another application. */
 async function terminateOwnedTree(child, { platform = process.platform, exec = execFile, kill = process.kill } = {}) {
   if (!child?.pid || child.exitCode != null || child.signalCode != null) return;
@@ -160,6 +186,7 @@ class FennecBackend {
     this.plan = null;
     this.startedAt = 0;
     this.generation = 0;
+    this.orphans = 0;
     Object.assign(this, { spawnChild, terminate, probe, checkPort, startupTimeout, pollMs });
   }
 
@@ -176,6 +203,7 @@ class FennecBackend {
     return { runtime: this.runtime, python: this.python, port: this.port, engineUrl: this.engineUrl,
       model: this.model, modelId: this.modelId, apiKey: this.apiKey ? '(set)' : '',
       owned: Boolean(this.child), state: this.state, lastError: this.lastError, plan: this.plan,
+      orphans: this.orphans || 0,
       uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0, logPath: this.logPath,
       setup: this.setupStatus(), backend: this.config.backend,
       connectionNote: this.state === 'ready' && !this.child
@@ -235,6 +263,14 @@ class FennecBackend {
     return this.start(modelDir, options);
   }
 
+  async cleanupOrphans() {
+    const startedAt = this.startedAt || 0;
+    const pids = await listOrphanEnginePids(startedAt);
+    const killed = await killOrphanEnginePids(pids);
+    this.orphans = (this.orphans || 0) + killed;
+    return { found: pids.length, killed, pids };
+  }
+
   stop() {
     if (this.stopping) return this.stopping;
     ++this.generation; // cancels an in-flight probe/start, including before spawn
@@ -244,6 +280,9 @@ class FennecBackend {
         await this.terminate(child);
         if (this.child === child) this.child = null;
       }
+      // Engines that re-execed and escaped the process tree (Windows) can
+      // outlive the owned child; sweep them so they do not accumulate.
+      try { await this.cleanupOrphans(); } catch { /* best-effort */ }
       this.state = 'stopped';
       this.startedAt = 0;
       this.modelId = null;
@@ -354,4 +393,4 @@ function parseMetrics(text) {
   }
   return out;
 }
-module.exports = { FennecBackend, listModels, findRuntime, findPython, probeServer, serveArgs, terminateOwnedTree, assertPortAvailable };
+module.exports = { FennecBackend, listModels, findRuntime, findPython, probeServer, serveArgs, terminateOwnedTree, listOrphanEnginePids, killOrphanEnginePids, assertPortAvailable };

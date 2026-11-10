@@ -223,6 +223,7 @@ ipcMain.handle('engine:stop', async () => {
   await backend.stop();
   return backend.describe();
 });
+ipcMain.handle('engine:cleanupOrphans', async () => backend.cleanupOrphans());
 
 ipcMain.handle('engine:stats', async () => backend.stats());
 ipcMain.handle('engine:log', () => backend.tailLog(200));
