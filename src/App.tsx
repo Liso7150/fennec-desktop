@@ -36,6 +36,7 @@ export default function App() {
   const [tab, setTab] = useState<'engine' | 'files'>('engine');
   const [approval, setApproval] = useState<{ id: string; name: string; args: Record<string, unknown> } | null>(null);
   const [tokensPerSecond, setTokensPerSecond] = useState<number | null>(null);
+  const [contextSaved, setContextSaved] = useState<{ tokens: number; seconds: number; before: number; after: number } | null>(null);
   const [attached, setAttached] = useState<{ path: string; content: string }[]>([]);
   const [image, setImage] = useState<{ name: string; dataUrl: string } | null>(null);
   const [recording, setRecording] = useState(false);
@@ -89,6 +90,14 @@ export default function App() {
   const handleEvent = useCallback((event: AgentEvent) => {
     if (event.type === 'usage') {
       setTokensPerSecond(event.tokensPerSecond);
+      if (event.contextCharsBefore) {
+        setContextSaved({
+          tokens: event.contextSavedTokens ?? 0,
+          seconds: event.contextSavedSeconds ?? 0,
+          before: event.contextCharsBefore,
+          after: event.contextCharsAfter ?? event.contextCharsBefore,
+        });
+      }
       return;
     }
     if (event.type === 'todos') {
@@ -307,6 +316,7 @@ export default function App() {
       return { role: m.role, content: m.content || '(no text)' };
     });
     setImage(null);
+    setContextSaved(null);
     const res = await window.fennec.agent.send({ messages: payload, extraContext });
     if (!res.ok) {
       setBusy(false);
@@ -367,6 +377,24 @@ export default function App() {
           {status.label}
         </span>
         {tokensPerSecond !== null && <span className="tiny muted">{tokensPerSecond.toFixed(1)} tok/s</span>}
+        {contextSaved && contextSaved.tokens > 0 && (
+          <span
+            className="tiny muted"
+            title={
+              'Context compaction: this turn sent ' +
+              contextSaved.before.toLocaleString() +
+              ' characters instead of ' +
+              contextSaved.after.toLocaleString() +
+              ', so ' +
+              contextSaved.tokens.toLocaleString() +
+              ' tokens were not re-sent. Seconds are estimated from the engine\'s own prefill rate on this turn.'
+            }
+          >
+            ctx −{Math.max(0, Math.round((1 - contextSaved.after / contextSaved.before) * 100))}% · −
+            {contextSaved.tokens >= 1000 ? `${(contextSaved.tokens / 1000).toFixed(1)}k` : contextSaved.tokens} tok
+            {contextSaved.seconds >= 1 ? ` · ≈${Math.round(contextSaved.seconds)} s` : ''}
+          </span>
+        )}
         {backend.state === 'ready' ? (
           <button className="btn ghost" onClick={stopEngine}>Stop</button>
         ) : (

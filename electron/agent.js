@@ -7,6 +7,7 @@
  * Everything is reported through onEvent so the renderer can draw it live.
  */
 const tools = require('./tools');
+const { compact, limits } = require('./context');
 
 const MAX_STEPS = 24;
 
@@ -54,14 +55,27 @@ async function runTurn(opts) {
   let totalCompletion = 0;
   let tokensPerSecond = 0;
   const startedTurn = Date.now();
+  const budget = limits();
+  const seen = new Map();
+  let contextSavedChars = 0;
+  let contextSavedTokens = 0;
+  let contextSavedSeconds = 0;
+  let contextBeforeChars = 0;
+  let contextAfterChars = 0;
 
   for (let step = 0; step < MAX_STEPS; step += 1) {
     if (signal?.aborted) throw new Cancelled('stopped');
 
     onEvent({ type: 'step', step: step + 1 });
+    // The convo keeps every result; only this payload is compacted.
+    const compacted = compact(convo, { ...budget, seen });
+    const stepSavedChars = Math.max(0, compacted.stats.charsBefore - compacted.stats.charsAfter);
+    contextBeforeChars += compacted.stats.charsBefore;
+    contextAfterChars += compacted.stats.charsAfter;
+    contextSavedChars += stepSavedChars;
     const body = {
       model,
-      messages: convo,
+      messages: compacted.messages,
       stream: true,
       temperature: settings.temperature ?? 0.2,
       top_p: settings.topP ?? 0.9,
@@ -92,6 +106,8 @@ async function runTurn(opts) {
     const calls = new Map();
     const stepStart = Date.now();
     let stepTokens = 0;
+    let stepPromptTokens = 0;
+    let firstTokenAt = 0;
 
     for await (const data of sseLines(res.body)) {
       if (signal?.aborted) throw new Cancelled('stopped');
@@ -105,10 +121,12 @@ async function runTurn(opts) {
       if (payload.usage) {
         totalPrompt = payload.usage.prompt_tokens ?? totalPrompt;
         totalCompletion = payload.usage.completion_tokens ?? totalCompletion;
+        stepPromptTokens = payload.usage.prompt_tokens ?? stepPromptTokens;
       }
       const choice = payload.choices?.[0];
       if (!choice) continue;
       const delta = choice.delta || {};
+      if (!firstTokenAt) firstTokenAt = Date.now();
       if (delta.reasoning_content) {
         reasoning += delta.reasoning_content;
         onEvent({ type: 'reasoning', text: delta.reasoning_content });
@@ -133,7 +151,25 @@ async function runTurn(opts) {
 
     const elapsed = Math.max(0.001, (Date.now() - stepStart) / 1000);
     if (stepTokens > 0) tokensPerSecond = +(stepTokens / elapsed).toFixed(2);
-    onEvent({ type: 'usage', promptTokens: totalPrompt, completionTokens: totalCompletion, tokensPerSecond });
+    const stepSavedTokens = Math.round(stepSavedChars / 4);
+    const ttft = firstTokenAt ? Math.max(0.001, (firstTokenAt - stepStart) / 1000) : 0;
+    contextSavedTokens += stepSavedTokens;
+    if (stepSavedTokens > 0 && stepPromptTokens > 0 && ttft > 0) {
+      // Seconds are estimated from this step's own prefill rate, so the panel
+      // shows them as approximate rather than measured wall-clock savings.
+      contextSavedSeconds += stepSavedTokens / (stepPromptTokens / ttft);
+    }
+    onEvent({
+      type: 'usage',
+      promptTokens: totalPrompt,
+      completionTokens: totalCompletion,
+      tokensPerSecond,
+      contextSavedTokens,
+      contextSavedChars,
+      contextSavedSeconds: +contextSavedSeconds.toFixed(1),
+      contextCharsBefore: contextBeforeChars,
+      contextCharsAfter: contextAfterChars,
+    });
 
     if (!calls.size) {
       onEvent({ type: 'done', text: assistantText, reasoning, toolResults, ms: Date.now() - startedTurn });
@@ -183,7 +219,7 @@ async function runTurn(opts) {
       }
       toolResults.push({ name: call.name, args, output: content });
       onEvent({ type: 'tool', phase: 'end', id: call.id, name: call.name, output: String(content).slice(0, 6000) });
-      convo.push({ role: 'tool', tool_call_id: call.id, content: String(content).slice(0, 60000) });
+      convo.push({ role: 'tool', tool_call_id: call.id, content: String(content) });
     }
   }
 

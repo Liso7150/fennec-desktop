@@ -244,7 +244,17 @@ export type AgentEvent =
   | { type: 'step'; step: number }
   | { type: 'assistant'; text: string }
   | { type: 'reasoning'; text: string }
-  | { type: 'usage'; promptTokens: number; completionTokens: number; tokensPerSecond: number }
+  | {
+      type: 'usage';
+      promptTokens: number;
+      completionTokens: number;
+      tokensPerSecond: number;
+      contextSavedTokens?: number;
+      contextSavedChars?: number;
+      contextSavedSeconds?: number;
+      contextCharsBefore?: number;
+      contextCharsAfter?: number;
+    }
   | { type: 'tool'; phase: 'start' | 'end' | 'error'; id: string; name: string; args?: Record<string, unknown>; output?: string; message?: string }
   | { type: 'todos'; todos: Todo[] }
   | { type: 'done'; text: string; ms: number }
