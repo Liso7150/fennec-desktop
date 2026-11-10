@@ -136,6 +136,21 @@ test('auto asks for the GPU tier when a Vulkan loader exists', () => {
   assert.ok(!('COLI_VULKAN' in mac), 'Metal is not requested from the auto path');
 });
 
+test('auto keeps the host expert pool small', () => {
+  const win = engineEnvironment({ backend: 'auto' }, { SystemRoot: 'C:\\Windows' },
+    { platform: 'win32', exists: (p) => p.endsWith('vulkan-1.dll') });
+  assert.strictEqual(win.COLI_VULKAN, '1');
+  assert.strictEqual(win.COLI_VK_TIER_HOST_GB, '4');
+
+  const inherited = engineEnvironment({ backend: 'auto' }, { COLI_VK_TIER_HOST_GB: '9' },
+    { platform: 'linux', exists: () => true });
+  assert.strictEqual(inherited.COLI_VK_TIER_HOST_GB, '9', 'an explicit pool wins');
+
+  const noLoader = engineEnvironment({ backend: 'auto' }, {},
+    { platform: 'linux', exists: () => false });
+  assert.ok(!('COLI_VK_TIER_HOST_GB' in noLoader));
+});
+
 test('engineEnvironment pins an explicit backend and clears the rest', () => {
   const cpu = engineEnvironment({ backend: 'cpu' }, { COLI_VULKAN: '1' });
   assert.deepStrictEqual([cpu.COLI_CUDA, cpu.COLI_VULKAN, cpu.COLI_METAL], ['0', '0', '0']);

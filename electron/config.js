@@ -109,7 +109,13 @@ function engineEnvironment(config, env = process.env, { platform = process.platf
     'COLI_VULKAN', 'COLI_METAL', 'COLI_CUDA', 'COLI_VK_DEV2']) delete next[key];
   // serve has no --backend flag, so an explicit choice is pinned through the env.
   if (config.backend === 'auto') {
-    if (hasVulkanLoader({ platform, exists, env })) next.COLI_VULKAN = '1';
+    if (hasVulkanLoader({ platform, exists, env })) {
+      next.COLI_VULKAN = '1';
+      // 4 GB of host expert pool keeps the hybrid layout and costs ~6 % decode
+      // against the engine's 13 GB default (13.95 vs 14.88 tok/s, 2026-11-10),
+      // while giving back ~9 GB of RAM; 2 GB falls off a cliff (6.27 tok/s).
+      if (!next.COLI_VK_TIER_HOST_GB) next.COLI_VK_TIER_HOST_GB = '4';
+    }
   } else {
     Object.assign(next, { COLI_VULKAN: '0', COLI_METAL: '0', COLI_CUDA: '0' });
     if (config.backend !== 'cpu') next[`COLI_${config.backend.toUpperCase()}`] = '1';
