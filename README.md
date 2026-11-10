@@ -3,6 +3,15 @@
 Local-first coding agent desktop app for [Colibri](https://github.com/JustVugg/colibri)
 models, with device-tiered MoE inference. Electron + React + Vite.
 
+## Features
+
+- **On-demand local engine** — starts `coli serve` on the first message, attaches to an engine that is already running, and stops the engine it owns on quit.
+- **Chat and agent turns** — streamed answers plus a bounded tool loop with per-run approvals.
+- **Path-jailed tools** — file reads, edits, grep and command runs stay inside the opened workspace.
+- **NPU embeddings** — optional Intel NPU sidecar for semantic search (never a decoder).
+- **Cross-platform builds** — NSIS/MSI, dmg, AppImage/deb, with a Windows/macOS/Linux CI matrix.
+- **Local-only** — models, caches, logs and settings never leave this device.
+
 ## Develop
 
 ```bash
