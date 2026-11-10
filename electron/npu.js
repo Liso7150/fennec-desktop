@@ -16,19 +16,14 @@ const { execFile } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const PYTHON_CANDIDATES = [
-  process.env.COLI_PYTHON,
-  'D:\\Colibri\\.venv\\Scripts\\python.exe',
-  'D:\\Colibri-Desktop\\.venv\\Scripts\\python.exe',
-].filter(Boolean);
-
 /** OpenVINO IR embedding models we are willing to run on the sidecar. */
-const EMBED_ROOTS = [
-  process.env.COLI_EMBED_MODEL,
-  'D:\\colibri-models\\embed',
-  'D:\\colibri-models',
-  'D:\\Colibri-Desktop\\models',
-].filter(Boolean);
+function embedRoots(config = {}) {
+  return [
+    process.env.COLI_EMBED_MODEL,
+    config.models_root && path.join(config.models_root, 'embed'),
+    config.models_root,
+  ].filter(Boolean);
+}
 
 const PROBE_PY = String.raw`
 import json, sys, time
@@ -175,8 +170,15 @@ except OSError as exc:
 print(json.dumps(out))
 `;
 
-function findPython() {
-  for (const p of PYTHON_CANDIDATES) {
+function findPython(config = {}) {
+  const engineRoot = config.engine_root || '';
+  const candidates = [
+    process.env.COLIBRI_PYTHON,
+    process.env.COLI_PYTHON,
+    config.python,
+    engineRoot && path.join(engineRoot, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python'),
+  ].filter(Boolean);
+  for (const p of candidates) {
     try {
       fs.accessSync(p);
       return p;
@@ -187,8 +189,8 @@ function findPython() {
   return 'python';
 }
 
-function findEmbedModel() {
-  for (const root of EMBED_ROOTS) {
+function findEmbedModel(config = {}) {
+  for (const root of embedRoots(config)) {
     try {
       if (!fs.statSync(root).isDirectory()) continue;
     } catch {
@@ -211,10 +213,10 @@ function findEmbedModel() {
   return null;
 }
 
-function runPython(script, stdin, timeoutMs) {
+function runPython(script, stdin, timeoutMs, python = 'python') {
   return new Promise((resolve) => {
     const child = execFile(
-      findPython(),
+      python,
       ['-c', script],
       { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' } },
       (err, stdout, stderr) => {
@@ -243,9 +245,10 @@ function runPython(script, stdin, timeoutMs) {
 }
 
 class Accelerator {
-  constructor() {
-    this.python = findPython();
-    this.embedModel = findEmbedModel();
+  constructor(config = {}) {
+    this.config = config;
+    this.python = findPython(config);
+    this.embedModel = findEmbedModel(config);
     this.lastProbe = null;
     this.probing = null;
   }
@@ -255,13 +258,13 @@ class Accelerator {
       python: this.python,
       embedModel: this.embedModel,
       lastProbe: this.lastProbe,
-      note: 'NPU and the iGPU host sidecar work (device probe, code index). Token generation stays on the Colibri engine (CPU experts + CUDA trunk).',
+      note: 'NPU and the iGPU host sidecar work (device probe, code index). Token generation stays on the Colibri engine (CPU experts + optional GPU trunk).',
     };
   }
 
   async probe() {
     if (this.probing) return this.probing;
-    this.probing = runPython(PROBE_PY, null, 120000).then((res) => {
+    this.probing = runPython(PROBE_PY, null, 120000, this.python).then((res) => {
       this.lastProbe = res;
       this.probing = null;
       return res;
@@ -274,6 +277,7 @@ class Accelerator {
       INDEX_PY,
       { workspace, device, model: this.embedModel, maxFiles: 400 },
       10 * 60 * 1000,
+      this.python,
     );
   }
 }

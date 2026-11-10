@@ -8,7 +8,7 @@ import type { AgentEvent, BackendState, ChatMessage, ModelInfo, Settings, Todo, 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 const EMPTY_BACKEND: BackendState = {
-  runtime: null, python: '', port: 8765, model: null, state: 'stopped',
+  runtime: null, python: '', port: 8184, model: null, state: 'stopped',
   lastError: null, plan: null, uptimeMs: 0, logPath: null,
 };
 

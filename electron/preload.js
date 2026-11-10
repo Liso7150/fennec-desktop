@@ -3,6 +3,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('colibri', {
   info: () => ipcRenderer.invoke('app:info'),
+  openSetup: () => ipcRenderer.invoke('app:open-setup'),
+  openWebWorkspace: () => ipcRenderer.invoke('app:open-workspace'),
   saveSettings: (patch) => ipcRenderer.invoke('settings:save', patch),
 
   pickWorkspace: () => ipcRenderer.invoke('workspace:pick'),

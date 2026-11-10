@@ -34,7 +34,7 @@ class Cancelled extends Error {}
 
 async function runTurn(opts) {
   const {
-    port,
+    engineUrl,
     model,
     apiKey,
     workspace,
@@ -73,14 +73,14 @@ async function runTurn(opts) {
 
     const headers = { 'Content-Type': 'application/json' };
     if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-    const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    const res = await fetch(new URL('/v1/chat/completions', engineUrl), {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
       signal,
     }).catch((err) => {
       if (err.name === 'AbortError') throw new Cancelled('stopped');
-      throw new Error(`cannot reach the Colibri engine on port ${port}: ${err.message}`);
+      throw new Error(`cannot reach the configured Colibri engine: ${err.message}`);
     });
 
     if (!res.ok) {
@@ -171,8 +171,8 @@ async function runTurn(opts) {
         if (tools.WRITE_TOOLS.has(call.name)) {
           const allowed =
             call.name === 'run_command'
-              ? settings.autoApproveCommands !== false
-              : settings.autoApproveWrites !== false;
+              ? settings.autoApproveCommands === true
+              : settings.autoApproveWrites === true;
           const verdict = allowed ? true : await approve({ id: call.id, name: call.name, args });
           if (!verdict) throw new Error('the user declined this action');
         }

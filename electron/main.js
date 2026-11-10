@@ -7,24 +7,26 @@ const { ColibriBackend, listModels } = require('./backend');
 const { Accelerator } = require('./npu');
 const { runTurn, Cancelled } = require('./agent');
 const { resolveInside } = require('./tools');
+const { safeExternalUrl } = require('./security');
+const { INSTALLER_URL } = require('./config');
 
 const isDev = process.env.ELECTRON_DEV === '1';
 const backend = new ColibriBackend();
-const accelerator = new Accelerator();
+const accelerator = new Accelerator(backend.config);
 let win = null;
 let currentTurn = null;
 const pendingApprovals = new Map();
 
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
 const defaultSettings = () => ({
-  workspace: '',
-  modelDir: '',
-  port: 8765,
+  workspace: backend.config.workspace,
+  modelDir: backend.config.model,
+  port: backend.port,
   kvSlots: 1,
   temperature: 0.2,
   topP: 0.9,
   maxTokens: 4096,
-  autoApproveWrites: true,
+  autoApproveWrites: false,
   autoApproveCommands: false,
   recentWorkspaces: [],
   devicePolicy: 'auto',
@@ -34,7 +36,12 @@ const defaultSettings = () => ({
 
 function loadSettings() {
   try {
-    return { ...defaultSettings(), ...JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) };
+    const saved = JSON.parse(fs.readFileSync(settingsFile(), 'utf8'));
+    return { ...defaultSettings(), ...saved,
+      // A legacy saved port/model must not override the suite's configured engine.
+      port: backend.port, modelDir: backend.config.model || saved.modelDir || '',
+      autoApproveWrites: saved.autoApproveWrites === true,
+      autoApproveCommands: saved.autoApproveCommands === true };
   } catch {
     return defaultSettings();
   }
@@ -44,7 +51,13 @@ function saveSettings(next) {
   const merged = { ...loadSettings(), ...next };
   fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
   fs.writeFileSync(settingsFile(), JSON.stringify(merged, null, 2));
-  return merged;
+  return loadSettings();
+}
+
+function openExternal(value) {
+  const url = safeExternalUrl(value);
+  if (!url) return Promise.resolve(false);
+  return shell.openExternal(url).then(() => true, () => false);
 }
 
 function createWindow() {
@@ -61,15 +74,24 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       spellcheck: false,
     },
   });
 
   win.once('ready-to-show', () => win.show());
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    void openExternal(url);
     return { action: 'deny' };
   });
+  win.webContents.on('will-navigate', (event, url) => {
+    event.preventDefault();
+    void openExternal(url);
+  });
+  win.webContents.on('will-frame-navigate', (event) => event.preventDefault());
+  win.webContents.on('will-redirect', (event) => event.preventDefault());
+  win.webContents.on('will-attach-webview', (event) => event.preventDefault());
+  win.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
 
   if (isDev) {
     win.loadURL('http://127.0.0.1:5173');
@@ -125,6 +147,8 @@ ipcMain.handle('app:info', () => ({
 }));
 
 ipcMain.handle('settings:save', (_e, patch) => saveSettings(patch));
+ipcMain.handle('app:open-setup', () => openExternal(INSTALLER_URL));
+ipcMain.handle('app:open-workspace', () => openExternal(backend.config.web_url));
 
 ipcMain.handle('workspace:pick', async () => {
   const res = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
@@ -144,7 +168,7 @@ ipcMain.handle('workspace:use', async (_e, workspace) => {
 ipcMain.handle('workspace:snapshot', (_e, workspace) => workspaceSnapshot(workspace));
 
 ipcMain.handle('models:list', async () => {
-  const models = await listModels();
+  const models = await listModels(backend.config);
   return models.map((m) => ({ ...m, selected: m.dir === loadSettings().modelDir }));
 });
 
@@ -153,7 +177,7 @@ ipcMain.handle('engine:describe', () => backend.describe());
 ipcMain.handle('engine:start', async (_e, { modelDir, port, kvSlots }) => {
   const settings = saveSettings({ modelDir, port, kvSlots });
   try {
-    const described = await backend.start(modelDir, { port, kvSlots });
+    const described = await backend.start(modelDir, { port, kvSlots, maxTokens: settings.maxTokens });
     return { ok: true, backend: described, settings };
   } catch (err) {
     return { ok: false, error: err.message, backend: backend.describe(), log: backend.tailLog(60) };
@@ -161,6 +185,9 @@ ipcMain.handle('engine:start', async (_e, { modelDir, port, kvSlots }) => {
 });
 
 ipcMain.handle('engine:stop', async () => {
+  if (currentTurn) currentTurn.abort();
+  for (const [, resolve] of pendingApprovals) resolve(false);
+  pendingApprovals.clear();
   await backend.stop();
   return backend.describe();
 });
@@ -245,8 +272,8 @@ ipcMain.handle('agent:send', async (_e, { messages, extraContext }) => {
 
   try {
     const result = await runTurn({
-      port: settings.port,
-      model: backend.modelId || settings.modelDir,
+      engineUrl: backend.engineUrl,
+      model: backend.modelId,
       apiKey: backend.apiKey,
       workspace: settings.workspace,
       messages,
@@ -275,19 +302,41 @@ ipcMain.handle('agent:stop', () => {
 
 /* ------------------------------------------------------------------ lifecycle */
 
-app.whenReady().then(() => {
-  Menu.setApplicationMenu(null);
+app.whenReady().then(async () => {
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    ...(process.platform === 'darwin' ? [{ role: 'appMenu' }] : []),
+    { label: 'Colibri', submenu: [
+      { label: 'Open shared web workspace', click: () => { void openExternal(backend.config.web_url); } },
+      { label: 'Install shared runtime and models', click: () => { void openExternal(INSTALLER_URL); } },
+      { label: 'Colibri engine credits', click: () => { void openExternal('https://github.com/JustVugg/colibri'); } },
+      { label: 'AirLLM credits', click: () => { void openExternal('https://github.com/lyogavin/airllm'); } },
+      { role: 'quit' },
+    ] },
+    { role: 'editMenu' },
+  ]));
+  await backend.attach(); // Probe only; opening the app never loads a model.
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
-app.on('window-all-closed', async () => {
-  await backend.stop().catch(() => {});
-  app.quit();
-});
-
-app.on('before-quit', async () => {
-  await backend.stop().catch(() => {});
+app.on('window-all-closed', () => app.quit());
+let quitting = false;
+let cleanedUp = false;
+app.on('before-quit', (event) => {
+  if (cleanedUp) return;
+  event.preventDefault();
+  if (quitting) return;
+  quitting = true;
+  if (currentTurn) currentTurn.abort();
+  for (const [, resolve] of pendingApprovals) resolve(false);
+  pendingApprovals.clear();
+  backend.stop().then(() => {
+    cleanedUp = true;
+    app.quit();
+  }).catch((err) => {
+    quitting = false;
+    dialog.showErrorBox('Engine cleanup failed', `Could not stop the owned engine: ${err.message}. Try Stop again.`);
+  });
 });
