@@ -37,4 +37,12 @@ contextBridge.exposeInMainWorld('colibri', {
     onEvent: (cb) => ipcRenderer.on('agent:event', (_e, data) => cb(data)),
     onApproval: (cb) => ipcRenderer.on('approval:request', (_e, data) => cb(data)),
   },
+  stt: {
+    transcribe: (audio, type) => ipcRenderer.invoke('stt:transcribe', { audio, type }),
+  },
+  updates: {
+    check: () => ipcRenderer.invoke('update:check'),
+    apply: () => ipcRenderer.invoke('update:apps'),
+    open: (url) => ipcRenderer.invoke('update:open', url),
+  },
 });

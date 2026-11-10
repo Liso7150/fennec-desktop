@@ -7,6 +7,11 @@ models, with device-tiered MoE inference. Electron + React + Vite.
 
 - **On-demand local engine** — starts `coli serve` on the first message, attaches to an engine that is already running, and stops the engine it owns on quit.
 - **Chat and agent turns** — streamed answers plus a bounded tool loop with per-run approvals.
+- **Reasoning display** — engine `reasoning_content` streams into a collapsible block above each answer.
+- **Vision** — attach one PNG/JPEG/WebP/GIF (or paste it) and it is sent as a base64 content part to the local engine.
+- **File attachments** — attach up to three text files as bounded context instead of pasting them.
+- **Speech** — dictate with the local faster-whisper sidecar and read answers aloud with the system voices.
+- **Update from GitHub** — check the latest release, open it, and fast-forward the suite checkouts with `git pull --ff-only`.
 - **Path-jailed tools** — file reads, edits, grep and command runs stay inside the opened workspace.
 - **NPU embeddings** — optional Intel NPU sidecar for semantic search (never a decoder).
 - **Cross-platform builds** — NSIS/MSI, dmg, AppImage/deb, with a Windows/macOS/Linux CI matrix.

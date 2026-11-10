@@ -18,6 +18,7 @@ export interface ChatMessage {
   streaming?: boolean;
   error?: string;
   ms?: number;
+  image?: { name: string; dataUrl: string };
 }
 
 export interface Todo {
@@ -153,7 +154,7 @@ declare global {
         }>;
       };
       agent: {
-        send: (payload: { messages: { role: string; content: string }[]; extraContext?: string }) => Promise<{
+        send: (payload: { messages: ChatPayloadMessage[]; extraContext?: string }) => Promise<{
           ok: boolean;
           cancelled?: boolean;
           error?: string;
@@ -163,8 +164,47 @@ declare global {
         onEvent: (cb: (event: AgentEvent) => void) => void;
         onApproval: (cb: (req: { id: string; name: string; args: Record<string, unknown> }) => void) => void;
       };
+      stt: {
+        transcribe: (audio: ArrayBuffer, type: string) => Promise<{
+          ok: boolean;
+          text?: string;
+          language?: string;
+          duration?: number;
+          error?: string;
+        }>;
+      };
+      updates: {
+        check: () => Promise<UpdateInfo & { ok: boolean }>;
+        apply: () => Promise<{
+          ok: boolean;
+          error?: string;
+          results: { repo: string; ok: boolean; output: string }[];
+        }>;
+        open: (url: string) => Promise<boolean>;
+      };
     };
   }
+}
+
+export type ContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+export interface ChatPayloadMessage {
+  role: string;
+  content: string | ContentPart[];
+}
+
+export interface UpdateInfo {
+  ok?: boolean;
+  current: string;
+  latest: string;
+  upToDate: boolean;
+  url: string;
+  name: string;
+  notes: string;
+  published: string | null;
+  error?: string;
 }
 
 export type AgentEvent =

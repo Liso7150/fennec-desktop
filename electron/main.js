@@ -9,10 +9,13 @@ const { runTurn, Cancelled } = require('./agent');
 const { resolveInside } = require('./tools');
 const { safeExternalUrl } = require('./security');
 const { INSTALLER_URL } = require('./config');
+const { SpeechToText } = require('./stt');
+const { checkDesktop, updateSuite } = require('./updates');
 
 const isDev = process.env.ELECTRON_DEV === '1';
 const backend = new ColibriBackend();
 const accelerator = new Accelerator(backend.config);
+const speech = new SpeechToText(backend.config);
 let win = null;
 let currentTurn = null;
 const pendingApprovals = new Map();
@@ -91,7 +94,10 @@ function createWindow() {
   win.webContents.on('will-frame-navigate', (event) => event.preventDefault());
   win.webContents.on('will-redirect', (event) => event.preventDefault());
   win.webContents.on('will-attach-webview', (event) => event.preventDefault());
-  win.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  // Microphone is used only by this window's speech-recognition button.
+  win.webContents.session.setPermissionRequestHandler((contents, permission, callback) => {
+    callback(permission === 'media' && contents === win.webContents);
+  });
 
   if (isDev) {
     win.loadURL('http://127.0.0.1:5173');
@@ -317,6 +323,40 @@ ipcMain.handle('agent:stop', () => {
   return true;
 });
 
+ipcMain.handle('stt:transcribe', async (_e, { audio, type }) => {
+  try {
+    const bytes = Buffer.from(audio);
+    if (!bytes.length || bytes.length > (16 << 20)) throw new Error('recording must be 1 byte to 16 MiB');
+    const result = await speech.transcribe(bytes, typeof type === 'string' && type ? type : 'audio/webm');
+    return { ok: true, text: result.text, language: result.language, duration: result.duration_s };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('update:check', async () => {
+  try {
+    return { ok: true, ...(await checkDesktop(app.getVersion())) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('update:apps', async () => {
+  try {
+    return { ok: true, ...(await updateSuite(backend.config.suite_root)) };
+  } catch (err) {
+    return { ok: false, error: err.message, results: [] };
+  }
+});
+
+ipcMain.handle('update:open', (_event, value) => {
+  if (typeof value !== 'string' || !/^https:\/\/github\.com\/Liso7150\/colibri-code(\/|$)/.test(value)) {
+    return Promise.resolve(false);
+  }
+  return openExternal(value);
+});
+
 /* ------------------------------------------------------------------ lifecycle */
 
 app.whenReady().then(async () => {
@@ -325,6 +365,25 @@ app.whenReady().then(async () => {
     { label: 'Colibri', submenu: [
       { label: 'Open shared web workspace', click: () => { void openExternal(backend.config.web_url); } },
       { label: 'Install shared runtime and models', click: () => { void openExternal(INSTALLER_URL); } },
+      { type: 'separator' },
+      { label: 'Check for updates…', click: async () => {
+        try {
+          const info = await checkDesktop(app.getVersion());
+          const answer = await dialog.showMessageBox(win, {
+            type: 'info',
+            title: 'Colibri Code updates',
+            message: info.upToDate ? `Colibri Code ${info.current} is current.` : `Version ${info.latest} is available (you have ${info.current}).`,
+            detail: info.notes || info.url,
+            buttons: info.upToDate ? ['OK'] : ['Open release page', 'Later'],
+            defaultId: 0,
+          });
+          if (!info.upToDate && answer.response === 0) await openExternal(info.url);
+        } catch (err) {
+          dialog.showErrorBox('Update check failed', err.message);
+        }
+      } },
+      { label: 'Open releases on GitHub', click: () => { void openExternal('https://github.com/Liso7150/colibri-code/releases'); } },
+      { type: 'separator' },
       { label: 'Colibri engine credits', click: () => { void openExternal('https://github.com/JustVugg/colibri'); } },
       { label: 'AirLLM credits', click: () => { void openExternal('https://github.com/lyogavin/airllm'); } },
       { role: 'quit' },
@@ -349,6 +408,7 @@ app.on('before-quit', (event) => {
   if (currentTurn) currentTurn.abort();
   for (const [, resolve] of pendingApprovals) resolve(false);
   pendingApprovals.clear();
+  speech.stop();
   backend.stop().then(() => {
     cleanedUp = true;
     app.quit();

@@ -3,7 +3,7 @@ import Markdown from './components/Markdown';
 import ToolCard from './components/ToolCard';
 import FileTree from './components/FileTree';
 import EnginePanel from './components/EnginePanel';
-import type { AgentEvent, BackendState, ChatMessage, ModelInfo, Settings, Todo, TreeNode } from './types';
+import type { AgentEvent, BackendState, ChatMessage, ChatPayloadMessage, ModelInfo, Settings, Todo, TreeNode, UpdateInfo } from './types';
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -37,8 +37,20 @@ export default function App() {
   const [approval, setApproval] = useState<{ id: string; name: string; args: Record<string, unknown> } | null>(null);
   const [tokensPerSecond, setTokensPerSecond] = useState<number | null>(null);
   const [attached, setAttached] = useState<{ path: string; content: string }[]>([]);
+  const [image, setImage] = useState<{ name: string; dataUrl: string } | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [sttBusy, setSttBusy] = useState(false);
+  const [audioNotice, setAudioNotice] = useState<string | null>(null);
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateLog, setUpdateLog] = useState('');
   const streamId = useRef<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
+  const filePicker = useRef<HTMLInputElement>(null);
+  const imagePicker = useRef<HTMLInputElement>(null);
+  const recorder = useRef<MediaRecorder | null>(null);
+  const chunks = useRef<Blob[]>([]);
 
   useEffect(() => {
     (async () => {
@@ -155,10 +167,120 @@ export default function App() {
     setAttached((prev) => (prev.some((f) => f.path === rel) ? prev : [...prev, { path: rel, content: clipped }]));
   };
 
+  const attachTextFromDisk = async (file: File) => {
+    if (file.size > 1_000_000) {
+      setAudioNotice('Text attachments must be at most 1 MB.');
+      return;
+    }
+    const text = await file.text();
+    if (text.includes('\0')) {
+      setAudioNotice('That looks like a binary file; attach text or an image.');
+      return;
+    }
+    const clipped = text.length > 24000 ? `${text.slice(0, 24000)}\n… truncated` : text;
+    setAttached((prev) => [...prev.filter((f) => f.path !== file.name), { path: file.name, content: clipped }]);
+  };
+
+  const attachImage = async (file: File) => {
+    if (!/^image\/(png|jpe?g|webp|gif)$/i.test(file.type)) {
+      setAudioNotice('Use a PNG, JPEG, WebP or GIF image.');
+      return;
+    }
+    if (file.size > 6_000_000) {
+      setAudioNotice('Images must be at most 6 MB.');
+      return;
+    }
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+    setAudioNotice(null);
+    setImage({ name: file.name, dataUrl });
+  };
+
+  const toggleMic = async () => {
+    setAudioNotice(null);
+    if (recording) {
+      recorder.current?.stop();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg']
+        .find((type) => MediaRecorder.isTypeSupported(type)) || '';
+      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      chunks.current = [];
+      rec.ondataavailable = (event) => {
+        if (event.data.size) chunks.current.push(event.data);
+      };
+      rec.onstop = async () => {
+        stream.getTracks().forEach((track) => track.stop());
+        setRecording(false);
+        const blob = new Blob(chunks.current, { type: rec.mimeType || 'audio/webm' });
+        if (!blob.size) return;
+        setSttBusy(true);
+        try {
+          const result = await window.colibri.stt.transcribe(await blob.arrayBuffer(), blob.type);
+          if (!result.ok) throw new Error(result.error || 'transcription failed');
+          if (result.text) setInput((prev) => (prev ? `${prev} ` : '') + result.text);
+        } catch (err) {
+          setAudioNotice(`Speech recognition failed: ${(err as Error).message}`);
+        } finally {
+          setSttBusy(false);
+        }
+      };
+      rec.start();
+      recorder.current = rec;
+      setRecording(true);
+    } catch (err) {
+      setAudioNotice(`Microphone unavailable: ${(err as Error).message}`);
+    }
+  };
+
+  const speak = (message: ChatMessage) => {
+    if (!('speechSynthesis' in window)) {
+      setAudioNotice('This system has no speech synthesis.');
+      return;
+    }
+    window.speechSynthesis.cancel();
+    if (speakingId === message.id) {
+      setSpeakingId(null);
+      return;
+    }
+    const text = message.content.replace(/```[\s\S]*?```/g, ' code block ').slice(0, 20000);
+    if (!text.trim()) return;
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.03;
+    utterance.lang = 'en-US';
+    utterance.onend = () => setSpeakingId(null);
+    utterance.onerror = () => setSpeakingId(null);
+    setSpeakingId(message.id);
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const checkUpdates = async () => {
+    setUpdateBusy(true);
+    setUpdateInfo(await window.colibri.updates.check());
+    setUpdateBusy(false);
+  };
+
+  const applyUpdates = async () => {
+    setUpdateBusy(true);
+    setUpdateLog('Pulling the suite checkouts…');
+    const result = await window.colibri.updates.apply();
+    const lines = result.results.map((row) => `${row.ok ? '✓' : '✗'} ${row.repo}\n${row.output}`).join('\n\n');
+    setUpdateLog(`${lines}${result.error ? `\n\n${result.error}` : ''}`);
+    setUpdateBusy(false);
+  };
+
   const send = async () => {
     const text = input.trim();
     if (!text || busy || !settings) return;
-    const userMessage: ChatMessage = { id: uid(), role: 'user', content: text, tools: [] };
+    const userMessage: ChatMessage = {
+      id: uid(), role: 'user', content: text, tools: [], image: image || undefined,
+    };
     const reply: ChatMessage = { id: uid(), role: 'assistant', content: '', tools: [], streaming: true };
     const history = [...messages.filter((m) => m.role !== 'assistant' || m.content || m.tools.length), userMessage];
     setMessages((prev) => [...prev, userMessage, reply]);
@@ -169,7 +291,19 @@ export default function App() {
     const extraContext = attached.map((f) => `--- ${f.path} ---\n${f.content}`).join('\n\n');
     setAttached([]);
 
-    const payload = history.map((m) => ({ role: m.role, content: m.content || '(no text)' }));
+    const payload: ChatPayloadMessage[] = history.map((m) => {
+      if (m.id === userMessage.id && image) {
+        return {
+          role: m.role,
+          content: [
+            { type: 'text' as const, text: m.content },
+            { type: 'image_url' as const, image_url: { url: image.dataUrl } },
+          ],
+        };
+      }
+      return { role: m.role, content: m.content || '(no text)' };
+    });
+    setImage(null);
     const res = await window.colibri.agent.send({ messages: payload, extraContext });
     if (!res.ok) {
       setBusy(false);
@@ -279,18 +413,65 @@ export default function App() {
                   {message.tools.map((call) => (
                     <ToolCard key={call.id} call={call} />
                   ))}
+                  {message.image && (
+                    <img className="msg-image" src={message.image.dataUrl} alt={message.image.name} />
+                  )}
                   {message.content && <Markdown text={message.content} />}
                   {message.streaming && !message.content && !message.tools.length && (
                     <div className="thinking"><span /><span /><span /></div>
                   )}
                   {message.error && <div className="error-box">{message.error}</div>}
-                  {message.ms && <div className="tiny muted">{(message.ms / 1000).toFixed(1)}s</div>}
+                  {(message.ms || (message.role === 'assistant' && message.content)) && (
+                    <div className="msg-actions">
+                      {message.role === 'assistant' && message.content && (
+                        <button className="link-btn" onClick={() => speak(message)}>
+                          {speakingId === message.id ? 'Stop reading' : 'Read aloud'}
+                        </button>
+                      )}
+                      {message.ms && <span className="tiny muted">{(message.ms / 1000).toFixed(1)}s</span>}
+                    </div>
+                  )}
                 </div>
               </article>
             ))}
           </div>
 
           <div className="composer">
+            <input
+              ref={filePicker}
+              type="file"
+              accept=".txt,.md,.json,.js,.jsx,.ts,.tsx,.css,.html,.py,.rs,.go,.java,.c,.h,.cpp,.yaml,.yml,.toml,.sh,.sql,.csv"
+              hidden
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = '';
+                if (file) void attachTextFromDisk(file);
+              }}
+            />
+            <input
+              ref={imagePicker}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              hidden
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = '';
+                if (file) void attachImage(file);
+              }}
+            />
+            {image && (
+              <div className="image-chip">
+                <img src={image.dataUrl} alt={image.name} />
+                <span>{image.name}</span>
+                <button className="icon-btn" title="Remove image" onClick={() => setImage(null)}>✕</button>
+              </div>
+            )}
+            {audioNotice && (
+              <div className="notice">
+                {audioNotice}
+                <button className="icon-btn" onClick={() => setAudioNotice(null)}>✕</button>
+              </div>
+            )}
             <textarea
               value={input}
               placeholder={
@@ -299,6 +480,13 @@ export default function App() {
                   : 'Ask for a change — the local engine starts automatically on the first message…'
               }
               onChange={(e) => setInput(e.target.value)}
+              onPaste={(e) => {
+                const file = Array.from(e.clipboardData.files).find((f) => f.type.startsWith('image/'));
+                if (file) {
+                  e.preventDefault();
+                  void attachImage(file);
+                }
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
@@ -308,10 +496,26 @@ export default function App() {
               rows={Math.min(10, Math.max(2, input.split('\n').length))}
             />
             <div className="composer-actions">
-              <span className="tiny muted">
-                {settings.workspace ? settings.workspace : 'no folder open'}
-                {attached.length ? ` · ${attached.length} file(s) attached` : ''}
-              </span>
+              <div className="composer-tools">
+                <button className="btn ghost" title="Attach a text file" disabled={busy} onClick={() => filePicker.current?.click()}>
+                  Attach
+                </button>
+                <button className="btn ghost" title="Attach one image (vision)" disabled={busy} onClick={() => imagePicker.current?.click()}>
+                  Image
+                </button>
+                <button
+                  className={`btn ghost${recording ? ' recording' : ''}`}
+                  title="Dictate with the local microphone"
+                  disabled={busy || sttBusy}
+                  onClick={() => void toggleMic()}
+                >
+                  {recording ? 'Stop recording' : sttBusy ? 'Transcribing…' : 'Mic'}
+                </button>
+                <span className="tiny muted">
+                  {settings.workspace ? settings.workspace : 'no folder open'}
+                  {attached.length ? ` · ${attached.length} file(s) attached` : ''}
+                </span>
+              </div>
               {busy ? (
                 <button className="btn danger" onClick={stop}>Stop</button>
               ) : (
@@ -359,6 +563,43 @@ export default function App() {
                 ) : (
                   <div className="muted">Nothing yet</div>
                 )}
+              </section>
+              <section className="card">
+                <div className="card-head">
+                  <h3>Updates</h3>
+                  <button className="btn ghost" disabled={updateBusy} onClick={() => void checkUpdates()}>
+                    {updateBusy ? 'Working…' : 'Check release'}
+                  </button>
+                </div>
+                {updateInfo && (
+                  <div className="update-box">
+                    {updateInfo.ok === false ? (
+                      <div className="error-box">{updateInfo.error || 'Could not reach GitHub.'}</div>
+                    ) : updateInfo.upToDate ? (
+                      <div className="muted tiny">Version {updateInfo.current} is current.</div>
+                    ) : (
+                      <>
+                        <div className="tiny">
+                          <strong>{updateInfo.latest}</strong> is available — you have {updateInfo.current}.
+                        </div>
+                        {updateInfo.notes && <pre className="update-notes">{updateInfo.notes}</pre>}
+                        <button className="link-btn" onClick={() => void window.colibri.updates.open(updateInfo.url)}>
+                          Open the release page
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+                <div className="row gap">
+                  <button className="btn" disabled={updateBusy} onClick={() => void applyUpdates()}>
+                    Update apps from GitHub
+                  </button>
+                </div>
+                <p className="muted tiny">
+                  Fast-forwards the local suite checkouts (desktop, core, CLI, setup hub and the web workspace)
+                  with <code>git pull --ff-only</code>. Engine sources are left alone.
+                </p>
+                {updateLog && <pre className="update-log">{updateLog}</pre>}
               </section>
               <section className="card">
                 <div className="card-head"><h3>How it works</h3></div>
