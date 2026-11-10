@@ -29,7 +29,7 @@ test('serveArgs builds the documented serve command', () => {
   assert.deepStrictEqual(argv.slice(2), [
     '--model', '/opt/models/qwen', '--auto-tier', '--policy', 'quality',
     '--ctx', '4096', '--host', '127.0.0.1', '--port', '8184',
-    '--api-key', 'test-key', '--kv-slots', '2', '--max-tokens', '8192',
+    '--api-key', 'test-key', '--kv-slots', '2', '--ngen', '8192',
   ]);
 });
 

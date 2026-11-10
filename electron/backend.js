@@ -110,7 +110,7 @@ function serveArgs(config, modelDir, { kvSlots = 1, maxTokens = 4096 } = {}) {
   if (!Number.isInteger(maxTokens) || maxTokens < 1) throw new Error('Invalid token limit');
   return [runtimePaths(config).cli, 'serve', '--model', modelDir, '--auto-tier', '--policy', config.policy,
     '--ctx', String(config.ctx), '--host', new URL(config.engine_url).hostname.replace(/^\[|\]$/g, ''),
-    '--port', String(config.port), '--api-key', config.api_key, '--kv-slots', String(kvSlots), '--max-tokens', String(maxTokens)];
+    '--port', String(config.port), '--api-key', config.api_key, '--kv-slots', String(kvSlots), '--ngen', String(maxTokens)];
 }
 
 /** Never use coli stop/pidfiles: those may belong to another application. */
