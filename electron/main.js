@@ -3,7 +3,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron')
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
-const { ColibriBackend, listModels } = require('./backend');
+const { FennecBackend, listModels } = require('./backend');
 const { Accelerator } = require('./npu');
 const { runTurn, Cancelled } = require('./agent');
 const { resolveInside } = require('./tools');
@@ -13,7 +13,7 @@ const { SpeechToText } = require('./stt');
 const { checkDesktop, refreshDesktop, updateSnapshot, updateSuite } = require('./updates');
 
 const isDev = process.env.ELECTRON_DEV === '1';
-const backend = new ColibriBackend();
+const backend = new FennecBackend();
 const accelerator = new Accelerator(backend.config);
 const speech = new SpeechToText(backend.config);
 let win = null;
@@ -70,7 +70,7 @@ function createWindow() {
     minWidth: 1040,
     minHeight: 700,
     backgroundColor: '#0b0d10',
-    title: 'Colibri Code',
+    title: 'Fennec Desktop',
     show: false,
     autoHideMenuBar: true,
     webPreferences: {
@@ -124,7 +124,7 @@ function refreshUpdateInfo(options) {
 
 function buildSystemPrompt(workspace, extraContext) {
   const parts = [
-    'You are Colibri Code, a coding agent running entirely on the user\'s own machine.',
+    'You are Fennec Desktop, a coding agent running entirely on the user\'s own machine.',
     'The model behind you is served by the Colibri engine, which pages expert weights from disk on demand.',
     'You work by calling tools: read files, edit them, search the tree, and run commands. Prefer tools over guessing.',
     'Rules:',
@@ -160,7 +160,7 @@ async function ensureEngineForTurn(settings) {
   let modelDir = settings.modelDir;
   if (!modelDir) {
     const ready = (await listModels(backend.config)).find((m) => m.ready);
-    if (!ready) throw new Error('no local model found. Run the Colibri installer, then pick a model in the Engine tab.');
+    if (!ready) throw new Error('no local model found. Run the Fennec installer, then pick a model in the Engine tab.');
     modelDir = ready.dir;
     saveSettings({ modelDir });
   }
@@ -368,7 +368,7 @@ ipcMain.handle('update:apps', async () => {
 });
 
 ipcMain.handle('update:open', (_event, value) => {
-  if (typeof value !== 'string' || !/^https:\/\/github\.com\/Liso7150\/colibri-code(\/|$)/.test(value)) {
+  if (typeof value !== 'string' || !/^https:\/\/github\.com\/Liso7150\/fennec-desktop(\/|$)/.test(value)) {
     return Promise.resolve(false);
   }
   return openExternal(value);
@@ -379,7 +379,7 @@ ipcMain.handle('update:open', (_event, value) => {
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     ...(process.platform === 'darwin' ? [{ role: 'appMenu' }] : []),
-    { label: 'Colibri', submenu: [
+    { label: 'Fennec', submenu: [
       { label: 'Open shared web workspace', click: () => { void openExternal(backend.config.web_url); } },
       { label: 'Install shared runtime and models', click: () => { void openExternal(INSTALLER_URL); } },
       { type: 'separator' },
@@ -388,8 +388,8 @@ app.whenReady().then(async () => {
           const info = await checkDesktop(app.getVersion());
           const answer = await dialog.showMessageBox(win, {
             type: 'info',
-            title: 'Colibri Code updates',
-            message: info.upToDate ? `Colibri Code ${info.current} is current.` : `Version ${info.latest} is available (you have ${info.current}).`,
+            title: 'Fennec Desktop updates',
+            message: info.upToDate ? `Fennec Desktop ${info.current} is current.` : `Version ${info.latest} is available (you have ${info.current}).`,
             detail: info.notes || info.url,
             buttons: info.upToDate ? ['OK'] : ['Open release page', 'Later'],
             defaultId: 0,
@@ -399,10 +399,10 @@ app.whenReady().then(async () => {
           dialog.showErrorBox('Update check failed', err.message);
         }
       } },
-      { label: 'Open releases on GitHub', click: () => { void openExternal('https://github.com/Liso7150/colibri-code/releases'); } },
+      { label: 'Open releases on GitHub', click: () => { void openExternal('https://github.com/Liso7150/fennec-desktop/releases'); } },
       { type: 'separator' },
-      { label: 'Colibri engine credits', click: () => { void openExternal('https://github.com/JustVugg/colibri'); } },
-      { label: 'AirLLM credits', click: () => { void openExternal('https://github.com/lyogavin/airllm'); } },
+      { label: 'Engine base idea: JustVugg/colibri', click: () => { void openExternal('https://github.com/JustVugg/colibri'); } },
+      { label: 'Fine-tuning: lyogavin/airllm', click: () => { void openExternal('https://github.com/lyogavin/airllm'); } },
       { role: 'quit' },
     ] },
     { role: 'editMenu' },

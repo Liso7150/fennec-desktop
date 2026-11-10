@@ -8,18 +8,18 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { ColibriBackend } = require('../electron/backend');
+const { FennecBackend } = require('../electron/backend');
 const { runTurn } = require('../electron/agent');
 
 async function main() {
   const modelDir = process.argv[2];
   if (!modelDir) throw new Error('usage: node scripts/e2e-agent.js <modelDir>');
-  const backend = new ColibriBackend();
+  const backend = new FennecBackend();
 
   console.log('runtime:', backend.runtime);
   console.log('python :', backend.python);
 
-  const workspace = await fsp.mkdtemp(path.join(os.tmpdir(), 'colibri-e2e-'));
+  const workspace = await fsp.mkdtemp(path.join(os.tmpdir(), 'fennec-e2e-'));
   await fsp.writeFile(path.join(workspace, 'calc.py'), 'def add(a, b):\n    return a - b\n', 'utf8');
   console.log('workspace:', workspace);
 

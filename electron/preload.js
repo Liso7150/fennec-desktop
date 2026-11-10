@@ -1,7 +1,7 @@
 'use strict';
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('colibri', {
+contextBridge.exposeInMainWorld('fennec', {
   info: () => ipcRenderer.invoke('app:info'),
   openSetup: () => ipcRenderer.invoke('app:open-setup'),
   openWebWorkspace: () => ipcRenderer.invoke('app:open-workspace'),

@@ -1,12 +1,12 @@
 {
-  "name": "colibri-code",
-  "productName": "Colibri Code",
-  "version": "1.3.0",
-  "description": "Local-first coding agent for Colibri models, with device-tiered MoE inference.",
+  "name": "fennec-desktop",
+  "productName": "Fennec Desktop",
+  "version": "1.4.0",
+  "description": "Local-first coding agent for Fennec models, with device-tiered MoE inference.",
   "main": "electron/main.js",
   "author": {
-    "name": "Colibri Desktop",
-    "email": "local@colibri.desktop"
+    "name": "Fennec Desktop",
+    "email": "local@fennec.desktop"
   },
   "license": "MIT",
   "private": true,
@@ -39,9 +39,9 @@
     "vite": "^5.4.9"
   },
   "build": {
-    "appId": "desktop.colibri.code",
-    "productName": "Colibri Code",
-    "copyright": "Colibri Desktop",
+    "appId": "com.fennec.desktop",
+    "productName": "Fennec Desktop",
+    "copyright": "Fennec Desktop",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -66,7 +66,7 @@
           ]
         }
       ],
-      "artifactName": "ColibriCode-${version}-${arch}.${ext}"
+      "artifactName": "FennecDesktop-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -74,13 +74,13 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Colibri Code"
+      "shortcutName": "Fennec Desktop"
     },
     "msi": {
       "oneClick": false,
       "perMachine": false,
       "createDesktopShortcut": true,
-      "shortcutName": "Colibri Code"
+      "shortcutName": "Fennec Desktop"
     },
     "mac": {
       "target": [
@@ -93,7 +93,7 @@
         }
       ],
       "category": "public.app-category.developer-tools",
-      "artifactName": "ColibriCode-${version}-${arch}.${ext}"
+      "artifactName": "FennecDesktop-${version}-${arch}.${ext}"
     },
     "linux": {
       "target": [
@@ -111,8 +111,8 @@
         }
       ],
       "category": "Development",
-      "maintainer": "local@colibri.desktop",
-      "artifactName": "ColibriCode-${version}-${arch}.${ext}"
+      "maintainer": "local@fennec.desktop",
+      "artifactName": "FennecDesktop-${version}-${arch}.${ext}"
     }
   },
   "allowScripts": {

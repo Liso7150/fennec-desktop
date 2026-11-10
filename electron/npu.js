@@ -231,7 +231,7 @@ try:
     out["ok"] = True
 except Exception as exc:
     out["error"] = "index run failed on %s: %s" % (device, str(exc)[:300])
-idx = os.path.join(os.path.expanduser("~"), ".colibri-code", "index", "workspace.json")
+idx = os.path.join(os.path.expanduser("~"), ".fennec-desktop", "index", "workspace.json")
 os.makedirs(os.path.dirname(idx), exist_ok=True)
 try:
     with open(idx, "w", encoding="utf-8") as fh:
@@ -250,7 +250,7 @@ print(json.dumps(out))
 function pythonCandidates(config = {}) {
   const engineRoot = config.engine_root || '';
   const raw = [
-    process.env.COLIBRI_PYTHON,
+    process.env.FENNEC_PYTHON,
     process.env.COLI_PYTHON,
     config.python,
     engineRoot && path.join(engineRoot, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python'),

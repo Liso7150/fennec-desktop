@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { compareVersions, refreshDesktop } = require('../electron/updates');
+const { compareVersions, refreshDesktop, updateSuite, upstreamCredits } = require('../electron/updates');
 
 function stubFetch(body) {
   const original = globalThis.fetch;
@@ -62,5 +62,23 @@ test('an unreachable GitHub reports an error instead of throwing', async () => {
     assert.match(info.error, /offline/);
   } finally {
     globalThis.fetch = original;
+  }
+});
+
+test('the suite update keeps both upstream credits', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fennec-updates-'));
+  try {
+    fs.mkdirSync(path.join(root, 'fennec-core', '.git'), { recursive: true });
+    const result = await updateSuite(root);
+    assert.strictEqual(result.results.length, 1);
+    assert.deepStrictEqual(result.upstream, upstreamCredits);
+    assert.match(result.upstream[0].url, /JustVugg\/colibri$/);
+    assert.match(result.upstream[0].role, /base idea/);
+    assert.match(result.upstream[1].url, /lyogavin\/airllm$/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });

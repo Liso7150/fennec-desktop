@@ -18,12 +18,12 @@ const {
 } = require('../electron/npu');
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'colibri-npu-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'fennec-npu-'));
 }
 
 function withEnvScrubbed(fn) {
   const saved = {};
-  for (const key of ['COLIBRI_PYTHON', 'COLI_PYTHON', 'COLI_EMBED_MODEL']) {
+  for (const key of ['FENNEC_PYTHON', 'COLI_PYTHON', 'COLI_EMBED_MODEL']) {
     saved[key] = process.env[key];
     delete process.env[key];
   }

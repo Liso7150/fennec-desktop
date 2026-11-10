@@ -1,5 +1,5 @@
 'use strict';
-// Local speech-to-text: spawn the colibri-core faster-whisper sidecar on demand.
+// Local speech-to-text: spawn the fennec-core faster-whisper sidecar on demand.
 const { spawn, execFile } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -10,13 +10,13 @@ class SpeechToText {
     this.config = config;
     this.process = null;
     this.url = 'http://127.0.0.1:8183';
-    this.logPath = path.join(config.cache_root, 'colibri', 'stt.log');
+    this.logPath = path.join(config.cache_root, 'fennec', 'stt.log');
   }
 
   script() {
     return [
-      path.join(this.config.suite_root, 'colibri-core', 'colibri_core', 'stt.py'),
-      path.join(this.config.engine_root, 'colibri_core', 'stt.py'),
+      path.join(this.config.suite_root, 'fennec-core', 'fennec_core', 'stt.py'),
+      path.join(this.config.engine_root, 'fennec_core', 'stt.py'),
     ].find((candidate) => fs.existsSync(candidate)) || null;
   }
 
@@ -39,7 +39,7 @@ class SpeechToText {
     if (health.status === 'ok') return health;
     if (!this.process || this.process.exitCode != null) {
       const script = this.script();
-      if (!script) throw new Error('colibri-core is not installed beside the suite; cannot start speech recognition');
+      if (!script) throw new Error('fennec-core is not installed beside the suite; cannot start speech recognition');
       if (!this.config.python || !fs.existsSync(this.config.python)) throw new Error('the shared Python runtime is missing');
       fs.mkdirSync(path.dirname(this.logPath), { recursive: true });
       const log = fs.openSync(this.logPath, 'w');

@@ -45,15 +45,15 @@ export default function EnginePanel({ backend, models, settings, onRefreshModels
   }, [settings.modelDir]);
 
   useEffect(() => {
-    void window.colibri.npu.status().then(setAccel);
+    void window.fennec.npu.status().then(setAccel);
   }, []);
 
   const runProbe = async () => {
     setProbeBusy(true);
     try {
-      const res = await window.colibri.npu.probe();
+      const res = await window.fennec.npu.probe();
       setProbe(res);
-      setAccel(await window.colibri.npu.status());
+      setAccel(await window.fennec.npu.status());
     } finally {
       setProbeBusy(false);
     }
@@ -63,7 +63,7 @@ export default function EnginePanel({ backend, models, settings, onRefreshModels
     setIndexBusy(true);
     setIndexMsg('');
     try {
-      const res = await window.colibri.npu.index(settings.npuDevice || 'NPU');
+      const res = await window.fennec.npu.index(settings.npuDevice || 'NPU');
       setIndexMsg(
         res.ok
           ? `${res.files} files / ${res.chunks} chunks indexed · ${res.passes} model passes on `
@@ -79,12 +79,12 @@ export default function EnginePanel({ backend, models, settings, onRefreshModels
     setDepsBusy(true);
     setDepsMsg('Installing with pip — this can take a few minutes…');
     try {
-      const res = await window.colibri.npu.ensure();
+      const res = await window.fennec.npu.ensure();
       const ready = res.ready ? ' (sidecar ready)' : ' (still not importable)';
       setDepsMsg(res.ok
         ? `${(res.packages || []).join(', ')} → ${res.python}${ready}`
         : `pip failed: ${res.output || res.error || 'unknown error'}`);
-      setAccel(await window.colibri.npu.status());
+      setAccel(await window.fennec.npu.status());
     } finally {
       setDepsBusy(false);
     }
@@ -94,11 +94,11 @@ export default function EnginePanel({ backend, models, settings, onRefreshModels
     setDepsBusy(true);
     setDepsMsg('Downloading the OpenVINO IR embedding model…');
     try {
-      const res = await window.colibri.npu.fetchModel();
+      const res = await window.fennec.npu.fetchModel();
       setDepsMsg(res.ok
         ? `embedding model at ${res.model || res.dest}`
         : `download failed: ${res.error || 'unknown error'}`);
-      setAccel(await window.colibri.npu.status());
+      setAccel(await window.fennec.npu.status());
     } finally {
       setDepsBusy(false);
     }
@@ -108,7 +108,7 @@ export default function EnginePanel({ backend, models, settings, onRefreshModels
     const tick = async () => {
       if (backend.state !== 'ready') return;
       try {
-        const s = await window.colibri.engine.stats();
+        const s = await window.fennec.engine.stats();
         setStats({ metrics: s.metrics });
       } catch {
         /* ignore */
@@ -123,7 +123,7 @@ export default function EnginePanel({ backend, models, settings, onRefreshModels
     if (!selected) return;
     setBusy(true);
     try {
-      const res = await window.colibri.engine.doctor(selected);
+      const res = await window.fennec.engine.doctor(selected);
       setDoctor(res as Report);
     } finally {
       setBusy(false);
@@ -152,7 +152,7 @@ export default function EnginePanel({ backend, models, settings, onRefreshModels
             <option value="">— choose a model —</option>
             {models.map((m) => (
               <option key={m.dir} value={m.dir}>
-                {m.name} · {m.sizeGb} GB{m.container ? ' · colibri' : m.gguf ? ' · gguf' : ' · hf shards'}
+                {m.name} · {m.sizeGb} GB{m.container ? ' · fennec' : m.gguf ? ' · gguf' : ' · hf shards'}
               </option>
             ))}
           </select>
@@ -352,7 +352,7 @@ export default function EnginePanel({ backend, models, settings, onRefreshModels
       <section className="card">
         <div className="card-head">
           <h3>Engine log</h3>
-          <button className="btn tiny-btn" onClick={async () => setLog(await window.colibri.engine.log())}>Load</button>
+          <button className="btn tiny-btn" onClick={async () => setLog(await window.fennec.engine.log())}>Load</button>
         </div>
         <pre className="log">{log || 'press Load to read the tail'}</pre>
       </section>

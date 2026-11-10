@@ -16,8 +16,8 @@ function greeting(): string {
   return [
     'Ready when you are.',
     '',
-    'Open a folder, pick a Colibri model and start the engine. The model never loads whole —',
-    'Colibri keeps a hot expert tier in VRAM, a warm tier in RAM, and pages the rest from SSD',
+    'Open a folder, pick a Fennec model and start the engine. The model never loads whole —',
+    'Fennec keeps a hot expert tier in VRAM, a warm tier in RAM, and pages the rest from SSD',
     'as the router asks for it.',
   ].join('\n');
 }
@@ -54,17 +54,17 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const info = await window.colibri.info();
+      const info = await window.fennec.info();
       setSettings(info.settings);
       setBackend(info.backend);
       void refreshModels();
       if (info.settings.workspace) void loadTree();
     })();
 
-    window.colibri.agent.onEvent((event) => handleEvent(event));
-    window.colibri.agent.onApproval((req) => setApproval(req));
+    window.fennec.agent.onEvent((event) => handleEvent(event));
+    window.fennec.agent.onApproval((req) => setApproval(req));
     // The main process checks the release feed at startup and on use.
-    window.colibri.updates.onInfo((info) => setUpdateInfo(info));
+    window.fennec.updates.onInfo((info) => setUpdateInfo(info));
   }, []);
 
   useEffect(() => {
@@ -72,16 +72,16 @@ export default function App() {
   }, [messages]);
 
   const refreshModels = useCallback(async () => {
-    const list = await window.colibri.listModels();
+    const list = await window.fennec.listModels();
     setModels(list);
   }, []);
 
   const loadTree = useCallback(async () => {
-    setTree(await window.colibri.files.tree());
+    setTree(await window.fennec.files.tree());
   }, []);
 
   const patch = useCallback(async (next: Partial<Settings>) => {
-    const merged = await window.colibri.saveSettings(next);
+    const merged = await window.fennec.saveSettings(next);
     setSettings(merged);
     return merged;
   }, []);
@@ -141,7 +141,7 @@ export default function App() {
   }, [loadTree]);
 
   const openFolder = async () => {
-    const res = await window.colibri.pickWorkspace();
+    const res = await window.fennec.pickWorkspace();
     if (!res) return;
     setSettings((s) => (s ? { ...s, workspace: res.workspace, recentWorkspaces: res.recentWorkspaces } : s));
     await loadTree();
@@ -150,7 +150,7 @@ export default function App() {
   const startEngine = async (modelDir: string) => {
     if (!settings) return;
     setBackend({ ...EMPTY_BACKEND, state: 'starting', runtime: backend.runtime, python: backend.python, port: settings.port });
-    const res = await window.colibri.engine.start({ modelDir, port: settings.port, kvSlots: settings.kvSlots });
+    const res = await window.fennec.engine.start({ modelDir, port: settings.port, kvSlots: settings.kvSlots });
     setBackend(res.backend);
     if (res.settings) setSettings(res.settings);
     if (!res.ok) {
@@ -161,10 +161,10 @@ export default function App() {
     }
   };
 
-  const stopEngine = async () => setBackend(await window.colibri.engine.stop());
+  const stopEngine = async () => setBackend(await window.fennec.engine.stop());
 
   const attachFile = async (rel: string) => {
-    const file = await window.colibri.files.read(rel);
+    const file = await window.fennec.files.read(rel);
     const clipped = file.content.length > 24000 ? `${file.content.slice(0, 24000)}\n… truncated` : file.content;
     setAttached((prev) => (prev.some((f) => f.path === rel) ? prev : [...prev, { path: rel, content: clipped }]));
   };
@@ -224,7 +224,7 @@ export default function App() {
         if (!blob.size) return;
         setSttBusy(true);
         try {
-          const result = await window.colibri.stt.transcribe(await blob.arrayBuffer(), blob.type);
+          const result = await window.fennec.stt.transcribe(await blob.arrayBuffer(), blob.type);
           if (!result.ok) throw new Error(result.error || 'transcription failed');
           if (result.text) setInput((prev) => (prev ? `${prev} ` : '') + result.text);
         } catch (err) {
@@ -264,16 +264,17 @@ export default function App() {
 
   const checkUpdates = async () => {
     setUpdateBusy(true);
-    setUpdateInfo(await window.colibri.updates.check());
+    setUpdateInfo(await window.fennec.updates.check());
     setUpdateBusy(false);
   };
 
   const applyUpdates = async () => {
     setUpdateBusy(true);
     setUpdateLog('Pulling the suite checkouts…');
-    const result = await window.colibri.updates.apply();
+    const result = await window.fennec.updates.apply();
     const lines = result.results.map((row) => `${row.ok ? '✓' : '✗'} ${row.repo}\n${row.output}`).join('\n\n');
-    setUpdateLog(`${lines}${result.error ? `\n\n${result.error}` : ''}`);
+    const credits = (result.upstream || []).map((entry) => `${entry.name} — ${entry.role}: ${entry.url}`).join('\n');
+    setUpdateLog(`${lines}${result.error ? `\n\n${result.error}` : ''}${credits ? `\n\nUpstream (not pulled):\n${credits}` : ''}`);
     setUpdateBusy(false);
   };
 
@@ -306,7 +307,7 @@ export default function App() {
       return { role: m.role, content: m.content || '(no text)' };
     });
     setImage(null);
-    const res = await window.colibri.agent.send({ messages: payload, extraContext });
+    const res = await window.fennec.agent.send({ messages: payload, extraContext });
     if (!res.ok) {
       setBusy(false);
       setMessages((prev) => prev.map((m) => (m.id === reply.id ? { ...m, streaming: false, error: res.error || (res.cancelled ? 'stopped' : 'failed') } : m)));
@@ -315,13 +316,13 @@ export default function App() {
   };
 
   const stop = async () => {
-    await window.colibri.agent.stop();
+    await window.fennec.agent.stop();
     setBusy(false);
   };
 
   const answerApproval = async (approved: boolean) => {
     if (!approval) return;
-    await window.colibri.agent.approve(approval.id, approved);
+    await window.fennec.agent.approve(approval.id, approved);
     setApproval(null);
   };
 
@@ -332,7 +333,7 @@ export default function App() {
     return { tone: 'idle', label: 'engine stopped' };
   }, [backend.state]);
 
-  if (!settings) return <div className="boot">starting Colibri Code…</div>;
+  if (!settings) return <div className="boot">starting Fennec Desktop…</div>;
 
   return (
     <div className="app">
@@ -340,7 +341,7 @@ export default function App() {
         <div className="brand">
           <span className="logo">◧</span>
           <div>
-            <strong>Colibri Code</strong>
+            <strong>Fennec Desktop</strong>
             <span className="tiny muted">local coding agent</span>
           </div>
         </div>
@@ -355,7 +356,7 @@ export default function App() {
           <button
             className="btn ghost"
             title={`${updateInfo.notes || 'Release notes on GitHub'}`}
-            onClick={() => void window.colibri.updates.open(updateInfo.url || 'https://github.com/Liso7150/colibri-code/releases')}
+            onClick={() => void window.fennec.updates.open(updateInfo.url || 'https://github.com/Liso7150/fennec-desktop/releases')}
           >
             {updateInfo.latest} available
           </button>
@@ -564,7 +565,7 @@ export default function App() {
                       key={w}
                       className="recent"
                       onClick={async () => {
-                        await window.colibri.useWorkspace(w);
+                        await window.fennec.useWorkspace(w);
                         setSettings((s) => (s ? { ...s, workspace: w } : s));
                         await loadTree();
                       }}
@@ -597,8 +598,8 @@ export default function App() {
                         {updateInfo.notes && <pre className="update-notes">{updateInfo.notes}</pre>}
                         <button
                           className="link-btn"
-                          onClick={() => void window.colibri.updates.open(
-                            updateInfo.url || 'https://github.com/Liso7150/colibri-code/releases',
+                          onClick={() => void window.fennec.updates.open(
+                            updateInfo.url || 'https://github.com/Liso7150/fennec-desktop/releases',
                           )}
                         >
                           Open the release page
@@ -614,7 +615,8 @@ export default function App() {
                 </div>
                 <p className="muted tiny">
                   Fast-forwards the local suite checkouts (desktop, core, CLI, setup hub and the web workspace)
-                  with <code>git pull --ff-only</code>. Engine sources are left alone.
+                  with <code>git pull --ff-only</code>. Upstream stays credited and is never pulled: the engine
+                  base idea is <code>JustVugg/colibri</code>, fine-tuning is <code>lyogavin/airllm</code>.
                 </p>
                 {updateLog && <pre className="update-log">{updateLog}</pre>}
               </section>

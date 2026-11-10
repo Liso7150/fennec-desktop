@@ -4,10 +4,14 @@ const { execFile } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const DESKTOP_REPO = 'Liso7150/colibri-code';
-const SUITE_REPOS = ['colibri-code', 'colibri-core', 'colibri-cli', 'colibri-installer',
-  'colibri-finetune', 'colibri-jetbrains', 'colibri-coding-agent'];
-const ENV_SETUP_DIR = 'Colibri-Enviorment-Setup';
+const DESKTOP_REPO = 'Liso7150/fennec-desktop';
+const SUITE_REPOS = ['fennec-desktop', 'fennec-core', 'fennec-cli', 'fennec-installer',
+  'fennec-finetune', 'fennec-jetbrains', 'fennec-coding-agent'];
+const ENV_SETUP_DIR = 'Fennec-Environment-Setup';
+const UPSTREAM_CREDITS = [
+  { name: 'JustVugg/colibri', role: 'base idea of the engine', url: 'https://github.com/JustVugg/colibri' },
+  { name: 'lyogavin/airllm', role: 'streamed LoRA fine-tuning', url: 'https://github.com/lyogavin/airllm' },
+];
 
 function gitPull(dir, timeout = 120000) {
   return new Promise((resolve) => {
@@ -36,7 +40,7 @@ async function checkDesktop(current) {
   let res;
   try {
     res = await fetch(`https://api.github.com/repos/${DESKTOP_REPO}/releases/latest`, {
-      headers: { 'User-Agent': 'Colibri-Code', Accept: 'application/vnd.github+json' },
+      headers: { 'User-Agent': 'Fennec-Code', Accept: 'application/vnd.github+json' },
       signal: AbortSignal.timeout(15000),
     });
   } catch (err) {
@@ -105,7 +109,10 @@ async function updateSuite(suiteRoot) {
     }
   }
   if (!results.length) throw new Error('no git checkouts found under ' + suiteRoot);
-  return { ok: results.every((row) => row.ok), results };
+  return { ok: results.every((row) => row.ok), results, upstream: UPSTREAM_CREDITS };
 }
 
-module.exports = { checkDesktop, compareVersions, refreshDesktop, updateSnapshot: snapshot, updateSuite };
+module.exports = {
+  checkDesktop, compareVersions, refreshDesktop, updateSnapshot: snapshot, updateSuite,
+  upstreamCredits: UPSTREAM_CREDITS,
+};

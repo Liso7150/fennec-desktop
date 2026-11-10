@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-const INSTALLER_URL = 'https://github.com/Liso7150/colibri-installer';
+const INSTALLER_URL = 'https://github.com/Liso7150/fennec-installer';
 function isLoopback(host) {
   return host === 'localhost' || host === '[::1]' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host);
 }
@@ -12,32 +12,32 @@ function loadConfig({ env = process.env, home = os.homedir(), platform = process
   exists = fs.existsSync, readFile = (p) => fs.readFileSync(p, 'utf8') } = {}) {
   const p = platform === 'win32' ? path.win32 : path.posix;
   const resolve = (value, base) => p.resolve(base, value.replace(/^~(?=$|[\\/])/, home));
-  const location = resolve(env.COLIBRI_CONFIG || p.join(home, '.colibri', 'config.json'), home);
+  const location = resolve(env.FENNEC_CONFIG || p.join(home, '.fennec', 'config.json'), home);
   let data = {};
   if (exists(location)) {
     try { data = JSON.parse(readFile(location)); }
     catch { throw new Error(`Cannot read configuration JSON: ${location}`); }
-  } else if (env.COLIBRI_CONFIG) {
+  } else if (env.FENNEC_CONFIG) {
     throw new Error(`Configured file does not exist: ${location}`);
   }
-  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Colibri configuration must be a JSON object');
-  if (Object.keys(data).some((k) => /^(api_key|app_token|token|colibri_api_key|colibri_app_token|coli_api_key)$/i.test(k))) {
-    throw new Error('Keep secrets in COLIBRI_API_KEY, not configuration JSON');
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Fennec configuration must be a JSON object');
+  if (Object.keys(data).some((k) => /^(api_key|app_token|token|fennec_api_key|fennec_app_token|coli_api_key)$/i.test(k))) {
+    throw new Error('Keep secrets in FENNEC_API_KEY, not configuration JSON');
   }
   const fallback = (windows, portable) => platform === 'win32' && exists(windows) ? windows : p.join(home, portable);
   const values = {
     engine_root: fallback('D:/Colibri', 'Colibri'),
-    suite_root: fallback('D:/Colibri-Suite', 'Colibri-Suite'),
-    models_root: fallback('D:/colibri-models', 'colibri-models'),
-    cache_root: fallback('D:/.cache', '.cache/colibri'),
+    suite_root: fallback('D:/Fennec-Suite', 'Fennec-Suite'),
+    models_root: fallback('D:/fennec-models', 'fennec-models'),
+    cache_root: fallback('D:/.cache', '.cache/fennec'),
     model: '', engine_url: 'http://127.0.0.1:8184', backend: 'auto', ctx: 0, policy: 'quality',
   };
   for (const key of [...Object.keys(values), 'python', 'workspace', 'web_root']) {
     if (key in data) values[key] = data[key];
   }
   const aliases = { COLI_PYTHON: 'python', COLI_MODEL: 'model', COLI_MODELS: 'models_root' };
-  const preferred = { COLIBRI_HOME: 'engine_root', COLIBRI_MODELS: 'models_root', COLIBRI_CACHE: 'cache_root',
-    COLIBRI_PYTHON: 'python', COLIBRI_MODEL: 'model', COLIBRI_ENGINE_URL: 'engine_url', COLIBRI_WORKSPACE: 'workspace' };
+  const preferred = { FENNEC_HOME: 'engine_root', FENNEC_MODELS: 'models_root', FENNEC_CACHE: 'cache_root',
+    FENNEC_PYTHON: 'python', FENNEC_MODEL: 'model', FENNEC_ENGINE_URL: 'engine_url', FENNEC_WORKSPACE: 'workspace' };
   for (const [variable, key] of Object.entries({ ...aliases, ...preferred })) {
     if (env[variable] !== undefined) values[key] = env[variable];
   }
@@ -46,7 +46,7 @@ function loadConfig({ env = process.env, home = os.homedir(), platform = process
   }
   for (const key of ['engine_root', 'suite_root', 'models_root', 'cache_root']) values[key] = resolve(values[key], p.dirname(location));
   values.workspace = resolve(values.workspace || values.suite_root, p.dirname(location));
-  values.web_root = resolve(values.web_root || p.join(values.suite_root, 'colibri-coding-agent', 'web'), p.dirname(location));
+  values.web_root = resolve(values.web_root || p.join(values.suite_root, 'fennec-coding-agent', 'web'), p.dirname(location));
   if (values.model) values.model = resolve(values.model, values.models_root);
   if (!['auto', 'vulkan', 'metal', 'cpu'].includes(values.backend)) throw new Error('Invalid backend selection');
   if (!['quality', 'balanced', 'experimental-fast'].includes(values.policy)) throw new Error('Invalid resource policy');
@@ -55,8 +55,8 @@ function loadConfig({ env = process.env, home = os.homedir(), platform = process
   try { url = new URL(values.engine_url); } catch { throw new Error('engine_url must be an HTTP(S) origin'); }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port === '0' ||
       url.pathname !== '/' || url.search || url.hash) throw new Error('engine_url must be an HTTP(S) origin without credentials, path or query');
-  values.api_key = env.COLIBRI_API_KEY || env.COLI_API_KEY || '';
-  if (!isLoopback(url.hostname) && !values.api_key) throw new Error('A non-loopback engine requires COLIBRI_API_KEY');
+  values.api_key = env.FENNEC_API_KEY || env.COLI_API_KEY || '';
+  if (!isLoopback(url.hostname) && !values.api_key) throw new Error('A non-loopback engine requires FENNEC_API_KEY');
   values.api_key ||= 'local';
   values.engine_url = url.origin;
   values.configPath = location;
@@ -85,7 +85,7 @@ function runtimePaths(config, { platform = process.platform, exists = fs.existsS
 
 function engineEnvironment(config, env = process.env) {
   const next = { ...env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' };
-  for (const key of ['COLIBRI_APP_TOKEN', 'COLIBRI_API_KEY', 'COLI_API_KEY',
+  for (const key of ['FENNEC_APP_TOKEN', 'FENNEC_API_KEY', 'COLI_API_KEY',
     'COLI_VULKAN', 'COLI_METAL', 'COLI_CUDA', 'COLI_VK_DEV2']) delete next[key];
   // serve has no --backend flag; auto delegates detection to coli.
   if (config.backend !== 'auto') {

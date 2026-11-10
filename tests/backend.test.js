@@ -4,13 +4,13 @@ const assert = require('node:assert');
 const http = require('node:http');
 const net = require('node:net');
 const {
-  ColibriBackend, probeServer, serveArgs, terminateOwnedTree, assertPortAvailable,
+  FennecBackend, probeServer, serveArgs, terminateOwnedTree, assertPortAvailable,
 } = require('../electron/backend');
 
 const config = {
-  engine_root: '/opt/colibri', suite_root: '/opt/colibri-suite', models_root: '/opt/models',
+  engine_root: '/opt/fennec', suite_root: '/opt/fennec-suite', models_root: '/opt/models',
   model: '', engine_url: 'http://127.0.0.1:8184', backend: 'auto', ctx: 4096,
-  policy: 'quality', api_key: 'test-key', port: 8184, cache_root: '/tmp/colibri-cache',
+  policy: 'quality', api_key: 'test-key', port: 8184, cache_root: '/tmp/fennec-cache',
 };
 
 function listen(handler) {
@@ -43,7 +43,7 @@ test('probeServer recognises a healthy Colibri engine', async () => {
     res.setHeader('content-type', 'application/json');
     if (req.url === '/health') res.end(JSON.stringify({ status: 'ok' }));
     else if (req.url === '/v1/models') {
-      res.end(JSON.stringify({ object: 'list', data: [{ object: 'model', id: 'qwen', owned_by: 'colibri' }] }));
+      res.end(JSON.stringify({ object: 'list', data: [{ object: 'model', id: 'qwen', owned_by: 'fennec' }] }));
     } else { res.statusCode = 404; res.end('{}'); }
   });
   try {
@@ -142,7 +142,7 @@ test('terminateOwnedTree signals only the owned process group on posix', async (
 });
 
 test('backend attaches to a healthy engine without spawning', async () => {
-  const backend = new ColibriBackend({
+  const backend = new FennecBackend({
     config,
     spawnChild: () => { throw new Error('attach must not spawn'); },
     probe: async () => ({ kind: 'ready', modelId: 'qwen' }),
@@ -156,22 +156,22 @@ test('backend attaches to a healthy engine without spawning', async () => {
 });
 
 test('backend reports a blocked engine instead of pretending readiness', async () => {
-  const backend = new ColibriBackend({
+  const backend = new FennecBackend({
     config,
-    probe: async () => ({ kind: 'foreign', message: 'Occupied endpoint did not return a valid Colibri model list.' }),
+    probe: async () => ({ kind: 'foreign', message: 'Occupied endpoint did not return a valid Fennec model list.' }),
   });
   assert.strictEqual(await backend.attach(), false);
   assert.strictEqual(backend.state, 'failed');
-  assert.match(backend.lastError, /Colibri model list/);
+  assert.match(backend.lastError, /Fennec model list/);
 });
 
 test('backend start refuses a port override that contradicts engine_url', async () => {
-  const backend = new ColibriBackend({ config, probe: async () => ({ kind: 'absent' }) });
+  const backend = new FennecBackend({ config, probe: async () => ({ kind: 'absent' }) });
   await assert.rejects(backend.start('/opt/models/qwen', { port: 9999 }), /engine_url/);
 });
 
 test('backend ensureRunning attaches without spawning when an engine is healthy', async () => {
-  const backend = new ColibriBackend({
+  const backend = new FennecBackend({
     config,
     spawnChild: () => { throw new Error('healthy engine must not spawn'); },
     probe: async () => ({ kind: 'ready', modelId: 'qwen' }),
@@ -187,7 +187,7 @@ test('backend ensureRunning spawns an engine on demand when the port is free', a
   const fs = require('node:fs');
   const path = require('node:path');
   const { EventEmitter } = require('node:events');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'colibri-ensure-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fennec-ensure-'));
   const engine = path.join(root, 'engine');
   const model = path.join(root, 'models', 'qwen');
   fs.mkdirSync(path.join(engine, 'c'), { recursive: true });
@@ -200,7 +200,7 @@ test('backend ensureRunning spawns an engine on demand when the port is free', a
   const spawned = [];
   let probes = 0;
   const child = Object.assign(new EventEmitter(), { pid: 4242, exitCode: null, signalCode: null });
-  const backend = new ColibriBackend({
+  const backend = new FennecBackend({
     config: { ...config, engine_root: engine, cache_root: path.join(root, 'cache'), python: process.execPath },
     spawnChild: (python, args, opts) => { spawned.push({ python, args, opts }); return child; },
     terminate: async () => {},

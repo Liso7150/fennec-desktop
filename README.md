@@ -1,7 +1,8 @@
-# Colibri Code (desktop)
+# Fennec Desktop (desktop)
 
-Local-first coding agent desktop app for [Colibri](https://github.com/JustVugg/colibri)
-models, with device-tiered MoE inference. Electron + React + Vite.
+Local-first coding agent desktop app for Fennec models, with device-tiered MoE
+inference whose base idea is [Colibri](https://github.com/JustVugg/colibri).
+Electron + React + Vite.
 
 ## Features
 
@@ -50,10 +51,11 @@ device.
 - `electron/` — main process, engine backend, agent loop, tools, NPU sidecar.
 - `src/` — React renderer.
 - `build/` — packaging resources (icons).
-- `jetbrains/` — moved to its own repo: `Liso7150/colibri-jetbrains`.
+- `jetbrains/` — moved to its own repo: `Liso7150/fennec-jetbrains`.
 
 ## Credits
 
-Engine: [JustVugg/colibri](https://github.com/JustVugg/colibri). Fine-tuning:
+Engine base idea: [JustVugg/colibri](https://github.com/JustVugg/colibri) —
+device-tiered MoE inference. Fine-tuning:
 [AirLLM](https://github.com/lyogavin/airllm). Part of the
-[Colibri suite](https://github.com/Liso7150/colibri-environment-setup).
+[Fennec suite](https://github.com/Liso7150/fennec-environment-setup).

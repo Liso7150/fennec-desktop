@@ -82,16 +82,16 @@ function request(base, route, apiKey, timeout = 2000) {
 async function probeServer(base, apiKey) {
   const health = await request(base, '/health', apiKey);
   if (!health.status) return { kind: health.error === 'ECONNREFUSED' ? 'absent' : 'blocked', message: health.error };
-  if (health.status === 401 || health.status === 403) return { kind: 'unauthorized', message: 'Engine authentication failed. Set COLIBRI_API_KEY.' };
+  if (health.status === 401 || health.status === 403) return { kind: 'unauthorized', message: 'Engine authentication failed. Set FENNEC_API_KEY.' };
   if (health.status !== 200 || safeJson(health.body)?.status !== 'ok') {
     return { kind: 'blocked', message: `Endpoint is occupied but not healthy (/health ${health.status}). No engine was started.` };
   }
   const models = await request(base, '/v1/models', apiKey);
-  if (models.status === 401 || models.status === 403) return { kind: 'unauthorized', message: 'Engine authentication failed. Set COLIBRI_API_KEY.' };
+  if (models.status === 401 || models.status === 403) return { kind: 'unauthorized', message: 'Engine authentication failed. Set FENNEC_API_KEY.' };
   const list = safeJson(models.body);
   if (models.status !== 200 || list?.object !== 'list' || !Array.isArray(list.data) || !list.data.length ||
-      !list.data.every((m) => m && m.object === 'model' && typeof m.id === 'string' && m.id.trim() && m.owned_by === 'colibri')) {
-    return { kind: 'foreign', message: 'Occupied endpoint did not return a valid Colibri model list. No engine was started.' };
+      !list.data.every((m) => m && m.object === 'model' && typeof m.id === 'string' && m.id.trim() && m.owned_by === 'fennec')) {
+    return { kind: 'foreign', message: 'Occupied endpoint did not return a valid Fennec model list. No engine was started.' };
   }
   return { kind: 'ready', modelId: list.data[0].id };
 }
@@ -138,7 +138,7 @@ async function terminateOwnedTree(child, { platform = process.platform, exec = e
   });
 }
 
-class ColibriBackend {
+class FennecBackend {
   constructor({ config, spawnChild = spawn, terminate = terminateOwnedTree, probe = probeServer,
     checkPort = assertPortAvailable, startupTimeout = 15 * 60 * 1000, pollMs = 1500 } = {}) {
     try { this.config = config || loadConfig(); }
@@ -167,7 +167,7 @@ class ColibriBackend {
     const issues = [];
     if (this.configError) issues.push(this.configError);
     if (!this.runtime) issues.push(`Engine checkout missing: ${this.cli} and ${this.server}. Run the shared installer.`);
-    if (!this.python) issues.push(`Shared Python runtime missing under ${this.config.engine_root}/.venv. Run the installer or set COLIBRI_PYTHON.`);
+    if (!this.python) issues.push(`Shared Python runtime missing under ${this.config.engine_root}/.venv. Run the installer or set FENNEC_PYTHON.`);
     if (!modelDir || !exists(path.join(modelDir, 'config.json'))) issues.push('Choose an installed model or set model in the shared configuration. Models are not bundled or downloaded by this app.');
     return { issues, configPath: this.config.configPath, installerUrl: INSTALLER_URL };
   }
@@ -294,7 +294,7 @@ class ColibriBackend {
     this.state = 'starting';
     this.model = modelDir;
     this.plan = null;
-    const logDir = path.join(this.config.cache_root, 'colibri-code', 'logs');
+    const logDir = path.join(this.config.cache_root, 'fennec-desktop', 'logs');
     fs.mkdirSync(logDir, { recursive: true });
     this.logPath = path.join(logDir, 'engine.log');
     const logFd = fs.openSync(this.logPath, 'w');
@@ -354,4 +354,4 @@ function parseMetrics(text) {
   }
   return out;
 }
-module.exports = { ColibriBackend, listModels, findRuntime, findPython, probeServer, serveArgs, terminateOwnedTree, assertPortAvailable };
+module.exports = { FennecBackend, listModels, findRuntime, findPython, probeServer, serveArgs, terminateOwnedTree, assertPortAvailable };

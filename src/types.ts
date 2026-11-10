@@ -116,7 +116,7 @@ export interface TreeNode {
 
 declare global {
   interface Window {
-    colibri: {
+    fennec: {
       info: () => Promise<{
         version: string;
         settings: Settings;
@@ -208,6 +208,7 @@ declare global {
           ok: boolean;
           error?: string;
           results: { repo: string; ok: boolean; output: string }[];
+          upstream?: { name: string; role: string; url: string }[];
         }>;
         open: (url: string) => Promise<boolean>;
         onInfo: (cb: (info: UpdateInfo) => void) => void;
