@@ -158,10 +158,6 @@ export default function App() {
   const send = async () => {
     const text = input.trim();
     if (!text || busy || !settings) return;
-    if (backend.state !== 'ready') {
-      setMessages((prev) => [...prev, { id: uid(), role: 'assistant', content: 'Start the Colibri engine first — the Engine tab has a **Start engine** button.', tools: [] }]);
-      return;
-    }
     const userMessage: ChatMessage = { id: uid(), role: 'user', content: text, tools: [] };
     const reply: ChatMessage = { id: uid(), role: 'assistant', content: '', tools: [], streaming: true };
     const history = [...messages.filter((m) => m.role !== 'assistant' || m.content || m.tools.length), userMessage];
@@ -300,7 +296,7 @@ export default function App() {
               placeholder={
                 backend.state === 'ready'
                   ? 'Ask for a change, or paste an error…  (Enter to send, Shift+Enter for a new line)'
-                  : 'Start the engine in the Engine tab to begin…'
+                  : 'Ask for a change — the local engine starts automatically on the first message…'
               }
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
@@ -368,8 +364,8 @@ export default function App() {
                 <div className="card-head"><h3>How it works</h3></div>
                 <p className="muted tiny">
                   Every request goes to the Colibri engine on <code>127.0.0.1:{settings.port}</code>. It is an
-                  OpenAI-compatible endpoint, so the same engine also serves the JetBrains plugin and any other tool
-                  you point at it.
+                  OpenAI-compatible endpoint that starts on demand and stops when this app closes, so nothing
+                  keeps running in the background. The same engine can serve the JetBrains plugin and other tools.
                 </p>
               </section>
             </div>

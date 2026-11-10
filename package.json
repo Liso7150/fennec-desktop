@@ -1,7 +1,7 @@
 {
   "name": "colibri-code",
   "productName": "Colibri Code",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Local-first coding agent for Colibri models, with device-tiered MoE inference.",
   "main": "electron/main.js",
   "author": {

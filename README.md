@@ -22,6 +22,14 @@ npm run dist:linux   # Linux AppImage/deb
 The app spawns the Colibri engine from the shared venv and talks to its
 OpenAI-compatible server; the agent loop and tools live in `electron/`.
 
+## On-demand engine
+
+Nothing listens in the background. The first message in a chat starts
+`coli serve` on the app's loopback port (8765 by default) using the shared
+suite config, and an engine the app spawned is stopped when the app quits.
+An engine that was already running is attached to and left alone. Models,
+caches, logs and settings stay on this device.
+
 ## Layout
 
 - `electron/` — main process, engine backend, agent loop, tools, NPU sidecar.

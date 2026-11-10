@@ -169,3 +169,54 @@ test('backend start refuses a port override that contradicts engine_url', async 
   const backend = new ColibriBackend({ config, probe: async () => ({ kind: 'absent' }) });
   await assert.rejects(backend.start('/opt/models/qwen', { port: 9999 }), /engine_url/);
 });
+
+test('backend ensureRunning attaches without spawning when an engine is healthy', async () => {
+  const backend = new ColibriBackend({
+    config,
+    spawnChild: () => { throw new Error('healthy engine must not spawn'); },
+    probe: async () => ({ kind: 'ready', modelId: 'qwen' }),
+  });
+  const described = await backend.ensureRunning('/opt/models/qwen');
+  assert.strictEqual(described.state, 'ready');
+  assert.strictEqual(described.modelId, 'qwen');
+  assert.strictEqual(described.owned, false);
+});
+
+test('backend ensureRunning spawns an engine on demand when the port is free', async () => {
+  const os = require('node:os');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { EventEmitter } = require('node:events');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'colibri-ensure-'));
+  const engine = path.join(root, 'engine');
+  const model = path.join(root, 'models', 'qwen');
+  fs.mkdirSync(path.join(engine, 'c'), { recursive: true });
+  fs.writeFileSync(path.join(engine, 'c', 'coli'), '');
+  fs.writeFileSync(path.join(engine, 'c', 'openai_server.py'), '');
+  fs.mkdirSync(model, { recursive: true });
+  fs.writeFileSync(path.join(model, 'config.json'), JSON.stringify({ model_type: 'qwen' }));
+  fs.writeFileSync(path.join(model, 'qwen36_meta.json'), '{}');
+  fs.writeFileSync(path.join(model, 'model-00001-of-00001.safetensors'), '');
+  const spawned = [];
+  let probes = 0;
+  const child = Object.assign(new EventEmitter(), { pid: 4242, exitCode: null, signalCode: null });
+  const backend = new ColibriBackend({
+    config: { ...config, engine_root: engine, cache_root: path.join(root, 'cache'), python: process.execPath },
+    spawnChild: (python, args, opts) => { spawned.push({ python, args, opts }); return child; },
+    terminate: async () => {},
+    checkPort: async () => {},
+    probe: async () => (++probes <= 2 ? { kind: 'absent' } : { kind: 'ready', modelId: 'qwen' }),
+    pollMs: 1,
+  });
+  try {
+    const described = await backend.ensureRunning(model, { kvSlots: 1, maxTokens: 512 });
+    assert.strictEqual(described.state, 'ready');
+    assert.strictEqual(described.modelId, 'qwen');
+    assert.strictEqual(described.owned, true);
+    assert.strictEqual(spawned.length, 1);
+    assert.deepStrictEqual(spawned[0].args.slice(0, 3), [path.join(engine, 'c', 'coli'), 'serve', '--model']);
+  } finally {
+    await backend.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

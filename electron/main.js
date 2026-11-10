@@ -136,6 +136,19 @@ async function workspaceSnapshot(workspace) {
   }
 }
 
+/* Start the engine only when a turn actually needs it. */
+async function ensureEngineForTurn(settings) {
+  if (backend.state === 'ready') return;
+  let modelDir = settings.modelDir;
+  if (!modelDir) {
+    const ready = (await listModels(backend.config)).find((m) => m.ready);
+    if (!ready) throw new Error('no local model found. Run the Colibri installer, then pick a model in the Engine tab.');
+    modelDir = ready.dir;
+    saveSettings({ modelDir });
+  }
+  await backend.ensureRunning(modelDir, { kvSlots: settings.kvSlots, maxTokens: settings.maxTokens });
+}
+
 /* ------------------------------------------------------------------ ipc */
 
 ipcMain.handle('app:info', () => ({
@@ -258,8 +271,12 @@ ipcMain.handle('approval:reply', (_e, { id, approved }) => {
 ipcMain.handle('agent:send', async (_e, { messages, extraContext }) => {
   const settings = loadSettings();
   if (!settings.workspace) throw new Error('open a folder first');
-  if (backend.state !== 'ready') throw new Error('start the Colibri engine first');
   if (currentTurn) throw new Error('a turn is already running');
+  try {
+    await ensureEngineForTurn(settings);
+  } catch (err) {
+    return { ok: false, error: `The local engine could not start: ${err.message}` };
+  }
 
   const controller = new AbortController();
   currentTurn = controller;

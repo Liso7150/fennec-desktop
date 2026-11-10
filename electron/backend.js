@@ -226,6 +226,15 @@ class ColibriBackend {
     return false;
   }
 
+  /** Attach to a healthy local engine, or spawn one on demand. */
+  async ensureRunning(modelDir = this.config.model, options = {}) {
+    if (this.configError) throw new Error(this.configError);
+    if (this.state === 'ready') return this.describe();
+    if (await this.attach()) return this.describe();
+    if (this.state === 'failed') throw new Error(this.lastError || 'Engine endpoint is not usable');
+    return this.start(modelDir, options);
+  }
+
   stop() {
     if (this.stopping) return this.stopping;
     ++this.generation; // cancels an in-flight probe/start, including before spawn
