@@ -9,3 +9,6 @@ release*/
 .DS_Store
 *.egg-info/
 .pytest_cache/
+# The OpenVINO NPU plugin writes this next to the working directory on every compile.
+kernel.errors.txt
+scratch-*.js
