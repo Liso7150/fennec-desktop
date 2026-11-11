@@ -3,7 +3,8 @@ import Markdown from './components/Markdown';
 import ToolCard from './components/ToolCard';
 import FileTree from './components/FileTree';
 import EnginePanel from './components/EnginePanel';
-import type { AgentEvent, BackendState, ChatMessage, ChatPayloadMessage, ModelInfo, Settings, Todo, TreeNode, UpdateInfo } from './types';
+import SetupWizard from './SetupWizard';
+import type { AgentEvent, BackendState, ChatMessage, ChatPayloadMessage, ModelInfo, Settings, SetupDetection, Todo, TreeNode, UpdateInfo } from './types';
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -46,6 +47,8 @@ export default function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateLog, setUpdateLog] = useState('');
+  const [setupInfo, setSetupInfo] = useState<SetupDetection | null>(null);
+  const [setupOpen, setSetupOpen] = useState(false);
   const streamId = useRef<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const filePicker = useRef<HTMLInputElement>(null);
@@ -58,6 +61,8 @@ export default function App() {
       const info = await window.fennec.info();
       setSettings(info.settings);
       setBackend(info.backend);
+      setSetupInfo(info.setup);
+      if (info.setup?.needed) setSetupOpen(true);
       void refreshModels();
       if (info.settings.workspace) void loadTree();
     })();
@@ -66,6 +71,7 @@ export default function App() {
     window.fennec.agent.onApproval((req) => setApproval(req));
     // The main process checks the release feed at startup and on use.
     window.fennec.updates.onInfo((info) => setUpdateInfo(info));
+    window.fennec.setup.onOpen(() => setSetupOpen(true));
   }, []);
 
   useEffect(() => {
@@ -342,6 +348,16 @@ export default function App() {
     if (backend.state === 'failed') return { tone: 'bad', label: 'engine failed' };
     return { tone: 'idle', label: 'engine stopped' };
   }, [backend.state]);
+
+  if (setupOpen && setupInfo) {
+    return (
+      <SetupWizard
+        detection={setupInfo}
+        firstRun={setupInfo.needed}
+        onClose={() => setSetupOpen(false)}
+      />
+    );
+  }
 
   if (!settings) return <div className="boot">starting Fennec Desktop…</div>;
 
@@ -647,6 +663,13 @@ export default function App() {
                   base idea is <code>JustVugg/colibri</code>, fine-tuning is <code>lyogavin/airllm</code>.
                 </p>
                 {updateLog && <pre className="update-log">{updateLog}</pre>}
+              </section>
+              <section className="card">
+                <div className="card-head"><h3>Setup</h3></div>
+                <p className="muted tiny">
+                  Folders, Python and engine paths live in <code>{setupInfo?.configPath || '~/.fennec/config.json'}</code>.
+                </p>
+                <button className="btn" onClick={() => setSetupOpen(true)}>Run setup wizard</button>
               </section>
               <section className="card">
                 <div className="card-head"><h3>How it works</h3></div>

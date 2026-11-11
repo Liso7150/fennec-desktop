@@ -1,5 +1,6 @@
 'use strict';
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
+const { execFile } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -10,6 +11,7 @@ const { resolveInside } = require('./tools');
 const { safeExternalUrl } = require('./security');
 const { INSTALLER_URL } = require('./config');
 const { SpeechToText } = require('./stt');
+const setup = require('./setup');
 const { checkDesktop, refreshDesktop, updateSnapshot, updateSuite } = require('./updates');
 
 const isDev = process.env.ELECTRON_DEV === '1';
@@ -110,6 +112,17 @@ function send(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 }
 
+function execCapture(command, args, { timeout = 120000 } = {}) {
+  return new Promise((resolve) => {
+    execFile(command, args, { timeout, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+      (err, stdout, stderr) => resolve({
+        code: err ? (err.code ?? 1) : 0,
+        stdout: stdout || '',
+        stderr: stderr || (err && err.message) || '',
+      }));
+  });
+}
+
 /**
  * Release feed check. Runs at startup and again when the window is focused or
  * an engine starts; updates.js caches the answer, so this stays one API call
@@ -174,12 +187,128 @@ ipcMain.handle('app:info', () => ({
   settings: loadSettings(),
   backend: backend.describe(),
   accelerator: accelerator.status(),
+  setup: setup.detectSetup(),
   packaged: app.isPackaged,
 }));
 
 ipcMain.handle('settings:save', (_e, patch) => saveSettings(patch));
 ipcMain.handle('app:open-setup', () => openExternal(INSTALLER_URL));
 ipcMain.handle('app:open-workspace', () => openExternal(backend.config.web_url));
+
+/* ------------------------------------------------------------- setup wizard */
+
+ipcMain.handle('setup:detect', () => setup.detectSetup());
+
+ipcMain.handle('setup:pick-folder', async (_e, { title, defaultPath } = {}) => {
+  const res = await dialog.showOpenDialog(win, {
+    title: typeof title === 'string' ? title : 'Choose a folder',
+    defaultPath: typeof defaultPath === 'string' && defaultPath ? defaultPath : undefined,
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  return res.canceled || !res.filePaths.length ? null : res.filePaths[0];
+});
+
+ipcMain.handle('setup:validate-root', (_e, directory) => setup.validateRoot(directory));
+
+ipcMain.handle('setup:prerequisites', (_e, { python } = {}) =>
+  setup.prerequisitePlan({ python: typeof python === 'string' ? python : '' }));
+
+ipcMain.handle('setup:install-prerequisite', async (_e, { id } = {}) => {
+  const item = setup.prerequisitePlan({}).find((entry) => entry.id === id);
+  if (!item) return { ok: false, error: 'Unknown prerequisite' };
+  if (item.installed) return { ok: true, output: `${item.name} is already installed.` };
+  if (!item.install) {
+    return { ok: false, manual: true, url: item.manual, error: `${item.name} needs a manual install.` };
+  }
+  if (item.install.requiresRoot) {
+    return { ok: false, manual: true, url: item.manual,
+      command: [item.install.command, ...item.install.args].join(' '),
+      error: `${item.name} needs administrator rights; run the shown command in a terminal.` };
+  }
+  const res = await execCapture(item.install.command, item.install.args, { timeout: 15 * 60 * 1000 });
+  return { ok: res.code === 0, output: `${res.stdout}${res.stderr}`.trim().slice(-8000) };
+});
+
+ipcMain.handle('setup:find-python', async () => {
+  const tried = [];
+  for (const candidate of setup.pythonCandidates()) {
+    tried.push(candidate.command);
+    const res = await execCapture(candidate.command, [...candidate.args, '-c', setup.PYTHON_PROBE], { timeout: 20000 });
+    if (res.code !== 0) continue;
+    const info = setup.parsePythonProbe(res.stdout);
+    if (!info.ok) continue;
+    return { ...info, command: candidate.command, source: candidate.source, tried };
+  }
+  return { ok: false, tried,
+    error: 'No Python 3.10+ interpreter was found. Install Python or choose its path.' };
+});
+
+ipcMain.handle('setup:check-python', async (_e, { python } = {}) => {
+  if (typeof python !== 'string' || !path.isAbsolute(python) || !fs.existsSync(python)) {
+    return { ok: false, error: 'Choose an absolute python.exe or bin/python3 path' };
+  }
+  const res = await execCapture(python, ['-c', setup.PYTHON_PROBE], { timeout: 20000 });
+  if (res.code !== 0) return { ok: false, error: `${res.stderr}${res.stdout}`.trim().slice(0, 800) || 'Python did not start' };
+  return { ...setup.parsePythonProbe(res.stdout), command: python, source: 'selected' };
+});
+
+ipcMain.handle('setup:ensure-pip', async (_e, { python } = {}) => {
+  if (typeof python !== 'string' || !path.isAbsolute(python)) return { ok: false, error: 'Invalid interpreter' };
+  const res = await execCapture(python, setup.ensurePipArgs(), { timeout: 120000 });
+  return { ok: res.code === 0, output: `${res.stdout}${res.stderr}`.trim().slice(-4000) };
+});
+
+ipcMain.handle('setup:check-deps', async (_e, { python } = {}) => {
+  if (typeof python !== 'string' || !path.isAbsolute(python)) return { ok: false, error: 'Invalid interpreter' };
+  const res = await execCapture(python, setup.dependencyProbeArgs(), { timeout: 60000 });
+  if (res.code !== 0) return { ok: false, error: `${res.stderr}${res.stdout}`.trim().slice(-2000) };
+  const parsed = setup.parseDependencyProbe(res.stdout);
+  return { ok: parsed.missing.length === 0, ...parsed };
+});
+
+ipcMain.handle('setup:install-deps', async (_e, { python, venv, packages } = {}) => {
+  if (typeof python !== 'string' || !path.isAbsolute(python)) return { ok: false, error: 'Invalid interpreter' };
+  const selected = Array.isArray(packages) && packages.length
+    ? packages.filter((spec) => setup.CORE_DEPS.includes(spec))
+    : setup.CORE_DEPS;
+  let args;
+  try { args = setup.pipInstallArgs(python, selected, { venv: venv === true }); }
+  catch (err) { return { ok: false, error: err.message }; }
+  const res = await execCapture(python, args, { timeout: 30 * 60 * 1000 });
+  return { ok: res.code === 0, code: res.code,
+    output: `${res.stdout}${res.stderr}`.trim().slice(-20000) };
+});
+
+ipcMain.handle('setup:validate-engine', (_e, directory) => setup.validateEngine(directory));
+
+ipcMain.handle('setup:clone-engine', async (_e, { directory } = {}) => {
+  if (typeof directory !== 'string' || !path.isAbsolute(directory)) {
+    return { ok: false, error: 'Choose an absolute engine folder' };
+  }
+  if (fs.existsSync(directory) && fs.readdirSync(directory).length) {
+    return { ok: false, error: 'That folder is not empty; choose an empty folder for the clone.' };
+  }
+  const res = await execCapture('git', setup.cloneEngineArgs(directory), { timeout: 15 * 60 * 1000 });
+  return { ok: res.code === 0, output: `${res.stdout}${res.stderr}`.trim().slice(-8000) };
+});
+
+ipcMain.handle('setup:scan-models', (_e, directory) => setup.scanModels(directory));
+
+ipcMain.handle('setup:open-download', (_e, kind) => {
+  const url = setup.DOWNLOADS[kind];
+  return url ? openExternal(url) : Promise.resolve(false);
+});
+
+ipcMain.handle('setup:save', async (_e, { values } = {}) => {
+  try {
+    const config = setup.buildConfig(values);
+    const result = setup.writeConfigAtomic(setup.configLocation(), config);
+    setTimeout(() => { app.relaunch(); app.exit(0); }, 600);
+    return { ok: true, ...result, config };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
 
 ipcMain.handle('workspace:pick', async () => {
   const res = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
@@ -383,6 +512,7 @@ app.whenReady().then(async () => {
     { label: 'Fennec', submenu: [
       { label: 'Open shared web workspace', click: () => { void openExternal(backend.config.web_url); } },
       { label: 'Install shared runtime and models', click: () => { void openExternal(INSTALLER_URL); } },
+      { label: 'Run setup wizard…', click: () => send('setup:open') },
       { type: 'separator' },
       { label: 'Check for updates…', click: async () => {
         try {

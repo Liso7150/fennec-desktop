@@ -6,6 +6,7 @@ Electron + React + Vite.
 
 ## Features
 
+- **First-run setup wizard** — on a machine with no `~/.fennec/config.json` the app asks for the install folder, the Python interpreter, the engine checkout and the models folder, checks and installs the core Python dependencies, and offers to install Python/Git with the platform's own package manager. It runs the same on Windows, macOS and Linux because it lives in the renderer, not in the OS installer. Re-runnable from the Files tab or the Fennec menu.
 - **On-demand local engine** — starts `coli serve` on the first message, attaches to an engine that is already running, and stops the engine it owns on quit.
 - **Chat and agent turns** — streamed answers plus a bounded tool loop with per-run approvals.
 - **Reasoning display** — engine `reasoning_content` streams into a collapsible block above each answer.
@@ -36,6 +37,21 @@ npm run dist:linux   # Linux AppImage/deb
 
 The app spawns the Colibri engine with `python` from PATH and talks to its
 OpenAI-compatible server; the agent loop and tools live in `electron/`.
+
+## First run
+
+When `~/.fennec/config.json` is missing the setup wizard opens before the chat:
+
+1. **Prerequisites** — Python 3.10+ and Git, with winget on Windows, Homebrew on macOS, or the exact package-manager command on Linux (no silent elevation).
+2. **Install folder** — default `~/Fennec`, with engine, suite, models and cache derived under it. Free space is checked because a 35B int4 container needs about 23 GB.
+3. **Python** — the first `python`/`python3` on PATH that is 3.10+, or a Browse-picked absolute interpreter; version, venv and pip are reported.
+4. **Dependencies** — `fastapi`, `uvicorn`, `psutil` and `pydantic` are probed by import; missing ones are installed with `python -m pip install --user` (or into the active venv) with `ensurepip` offered when pip is absent.
+5. **Engine** — validates `c/coli` and `c/openai_server.py`, and can clone upstream `JustVugg/colibri` into an empty folder.
+6. **Models** — scans folders for `config.json` and weights, lets you pick one, and allows finishing without a model.
+7. **Review** — writes the config atomically (backing up an existing file), then restarts the app.
+
+No secret is ever written to the config; API keys stay in `FENNEC_API_KEY`.
+The wizard is bypassed when a readable config already exists.
 
 ## On-demand engine
 

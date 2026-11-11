@@ -122,9 +122,28 @@ declare global {
         settings: Settings;
         backend: BackendState;
         accelerator?: AcceleratorStatus;
+        setup: SetupDetection;
         packaged: boolean;
       }>;
       saveSettings: (patch: Partial<Settings>) => Promise<Settings>;
+      setup: {
+        detect: () => Promise<SetupDetection>;
+        pickFolder: (options?: { title?: string; defaultPath?: string }) => Promise<string | null>;
+        validateRoot: (dir: string) => Promise<{ ok: boolean; writable: boolean; freeBytes: number; error?: string; created?: boolean }>;
+        prerequisites: (payload?: { python?: string }) => Promise<Prerequisite[]>;
+        installPrerequisite: (id: string) => Promise<InstallResult>;
+        findPython: () => Promise<PythonStatus>;
+        checkPython: (python: string) => Promise<PythonStatus>;
+        ensurePip: (python: string) => Promise<InstallResult>;
+        checkDeps: (python: string) => Promise<DependencyStatus>;
+        installDeps: (payload: { python: string; venv?: boolean; packages?: string[] }) => Promise<InstallResult>;
+        validateEngine: (dir: string) => Promise<EngineStatus>;
+        cloneEngine: (dir: string) => Promise<InstallResult>;
+        scanModels: (dir: string) => Promise<SetupModel[]>;
+        save: (values: Record<string, unknown>) => Promise<SetupResult>;
+        openDownload: (kind: string) => Promise<boolean>;
+        onOpen: (cb: () => void) => void;
+      };
       pickWorkspace: () => Promise<{ workspace: string; recentWorkspaces: string[]; snapshot: string | null } | null>;
       useWorkspace: (dir: string) => Promise<{ workspace: string; snapshot: string | null }>;
       workspaceSnapshot: (dir: string) => Promise<string | null>;
@@ -224,6 +243,109 @@ export type ContentPart =
 export interface ChatPayloadMessage {
   role: string;
   content: string | ContentPart[];
+}
+
+export interface SetupModel {
+  name: string;
+  path: string;
+  sizeGb: number;
+  shards: number;
+  hasConfig: boolean;
+  hasWeights: boolean;
+  ready: boolean;
+}
+
+export interface SetupDevice {
+  platform: string;
+  arch: string;
+  cores: number;
+  ramGb: number;
+  freeGb: number;
+  vulkan: boolean;
+  metal: boolean;
+}
+
+export interface SetupRoots {
+  root: string;
+  engine: string;
+  suite: string;
+  models: string;
+  cache: string;
+}
+
+export interface SetupDetection {
+  needed: boolean;
+  configPath: string;
+  configError: string | null;
+  roots: SetupRoots;
+  existing: Record<string, unknown> | null;
+  models: SetupModel[];
+  device: SetupDevice;
+}
+
+export interface PythonStatus {
+  ok: boolean;
+  version?: string;
+  major?: number;
+  minor?: number;
+  patch?: number;
+  venv?: boolean;
+  executable?: string;
+  hasPip?: boolean;
+  command?: string;
+  source?: string;
+  error?: string | null;
+  tried?: string[];
+}
+
+export interface DependencyStatus {
+  ok: boolean;
+  missing?: string[];
+  installed?: string[];
+  modules?: string[];
+  error?: string;
+}
+
+export interface InstallResult {
+  ok: boolean;
+  output?: string;
+  error?: string;
+  manual?: boolean;
+  url?: string;
+  command?: string;
+  code?: number;
+}
+
+export interface PrerequisiteInstall {
+  label: string;
+  command: string;
+  args: string[];
+  requiresRoot?: boolean;
+}
+
+export interface Prerequisite {
+  id: string;
+  name: string;
+  required: boolean;
+  installed: boolean;
+  detail: string;
+  manual: string;
+  install?: PrerequisiteInstall;
+}
+
+export interface EngineStatus {
+  ok: boolean;
+  path: string;
+  missing: string[];
+  isDirectory: boolean;
+}
+
+export interface SetupResult {
+  ok: boolean;
+  path?: string;
+  backup?: string | null;
+  error?: string;
+  config?: Record<string, unknown>;
 }
 
 export interface UpdateInfo {
