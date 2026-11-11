@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react';
-import type { AcceleratorStatus, BackendState, ModelInfo, ProbeResult, Settings } from '../types';
+import type { AcceleratorStatus, BackendState, ModelInfo, OutletStatus, ProbeResult, Settings } from '../types';
 
 const DEVICES = ['NPU', 'GPU.0', 'GPU.1', 'CPU'];
 
@@ -39,6 +39,8 @@ export default function EnginePanel({ backend, models, settings, onRefreshModels
   const [indexMsg, setIndexMsg] = useState('');
   const [depsBusy, setDepsBusy] = useState(false);
   const [depsMsg, setDepsMsg] = useState('');
+  const [outlets, setOutlets] = useState<OutletStatus | null>(null);
+  const [outletsBusy, setOutletsBusy] = useState(false);
 
   useEffect(() => {
     if (settings.modelDir) setSelected(settings.modelDir);
@@ -47,6 +49,19 @@ export default function EnginePanel({ backend, models, settings, onRefreshModels
   useEffect(() => {
     void window.fennec.npu.status().then(setAccel);
   }, []);
+
+  useEffect(() => {
+    void window.fennec.outlets.status().then(setOutlets);
+  }, []);
+
+  const checkOutlets = async (refresh = false) => {
+    setOutletsBusy(true);
+    try {
+      setOutlets(await window.fennec.outlets.status(refresh));
+    } finally {
+      setOutletsBusy(false);
+    }
+  };
 
   const runProbe = async () => {
     setProbeBusy(true);
@@ -294,6 +309,47 @@ export default function EnginePanel({ backend, models, settings, onRefreshModels
           huggingface_hub; no exporter, and nothing pulls torch into that interpreter.
         </div>
         {accel?.note && <p className="muted tiny">{accel.note}</p>}
+      </section>
+
+      <section className="card">
+        <div className="card-head">
+          <h3>Browser outlets</h3>
+          <button className="btn tiny-btn" onClick={() => void checkOutlets(true)} disabled={outletsBusy}>
+            {outletsBusy ? 'Checking…' : 'Re-check'}
+          </button>
+        </div>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={settings.browserOutlets !== false}
+            onChange={(e) => onSettings({ browserOutlets: e.target.checked })}
+          />
+          <span>Let the agent delegate web tasks on this machine</span>
+        </label>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={settings.autoApproveBrowser === true}
+            onChange={(e) => onSettings({ autoApproveBrowser: e.target.checked })}
+          />
+          <span>Run browser tasks without asking</span>
+        </label>
+        {outlets?.error && <div className="error-box">{outlets.error}</div>}
+        <div className="kv">
+          <span>Jev · jev-ultrafast</span>
+          <code>{outlets?.outlets?.jev.present ? 'ready' : (outlets?.outlets?.jev.note || 'not checked')}</code>
+          <span>OpenBot</span>
+          <code>
+            {outlets?.outlets?.openbot.present
+              ? `${outlets.outlets.openbot.agents.length || '?'} coworker${outlets.outlets.openbot.agents.length === 1 ? '' : 's'} on ${outlets.outlets.openbot.url}`
+              : (outlets?.outlets?.openbot.note || 'not checked')}
+          </code>
+        </div>
+        <p className="muted tiny">
+          Both are separate programs the user installed; Fennec asks the local Fennec service to drive them and
+          never modifies or vendors either upstream. Jev spends a key configured inside its own checkout, so a
+          browser task is approved here first unless the switch above is on.
+        </p>
       </section>
 
       <section className="card">

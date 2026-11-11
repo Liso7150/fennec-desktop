@@ -7,6 +7,7 @@
  * Everything is reported through onEvent so the renderer can draw it live.
  */
 const tools = require('./tools');
+const { OUTLET_TOOLS } = require('./outlets');
 const { compact, limits } = require('./context');
 
 const MAX_STEPS = 24;
@@ -45,6 +46,7 @@ async function runTurn(opts) {
     onEvent,
     approve,
     signal,
+    outlets = null,
   } = opts;
 
   const convo = [{ role: 'system', content: systemPrompt }, ...messages];
@@ -57,6 +59,9 @@ async function runTurn(opts) {
   const startedTurn = Date.now();
   const budget = limits();
   const seen = new Map();
+  // Outlet tools are advertised only while their outlet is answering, but the
+  // approval gate keys off the tool name, so an invented call is still refused.
+  const toolSpecs = outlets ? [...tools.TOOL_SPECS, ...outlets.specs()] : tools.TOOL_SPECS;
   let contextSavedChars = 0;
   let contextSavedTokens = 0;
   let contextSavedSeconds = 0;
@@ -80,7 +85,7 @@ async function runTurn(opts) {
       temperature: settings.temperature ?? 0.2,
       top_p: settings.topP ?? 0.9,
       max_tokens: settings.maxTokens ?? 4096,
-      tools: tools.TOOL_SPECS,
+      tools: toolSpecs,
       tool_choice: 'auto',
       stream_options: { include_usage: true },
     };
@@ -211,8 +216,14 @@ async function runTurn(opts) {
               : settings.autoApproveWrites === true;
           const verdict = allowed ? true : await approve({ id: call.id, name: call.name, args });
           if (!verdict) throw new Error('the user declined this action');
+        } else if (OUTLET_TOOLS.has(call.name)) {
+          if (!outlets) throw new Error('browser outlets are switched off in Settings');
+          if (settings.autoApproveBrowser !== true) {
+            const verdict = await approve({ id: call.id, name: call.name, args, browser: true });
+            if (!verdict) throw new Error('the user declined this action');
+          }
         }
-        content = await executeTool(workspace, call.name, args, onEvent);
+        content = await executeTool(workspace, call.name, args, onEvent, { outlets, signal });
       } catch (err) {
         content = `error: ${err.message}`;
         onEvent({ type: 'tool', phase: 'error', id: call.id, name: call.name, message: err.message });
@@ -228,7 +239,7 @@ async function runTurn(opts) {
   throw new Error(message);
 }
 
-async function executeTool(workspace, name, args, onEvent) {
+async function executeTool(workspace, name, args, onEvent, { outlets, signal } = {}) {
   switch (name) {
     case 'read_file':
       return tools.readFile(workspace, args);
@@ -244,6 +255,9 @@ async function executeTool(workspace, name, args, onEvent) {
       const result = await tools.runCommand(workspace, args);
       return `exit ${result.code}\n${result.output}`;
     }
+    case 'web_task':
+    case 'coworker_task':
+      return outlets.run(name, args, { signal });
     case 'todo_write':
       onEvent({ type: 'todos', todos: args.todos || [] });
       return 'plan recorded';

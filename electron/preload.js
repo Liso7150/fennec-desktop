@@ -52,6 +52,9 @@ contextBridge.exposeInMainWorld('fennec', {
     ensure: (options) => ipcRenderer.invoke('npu:ensure', options),
     fetchModel: () => ipcRenderer.invoke('npu:model'),
   },
+  outlets: {
+    status: (refresh) => ipcRenderer.invoke('outlets:status', { refresh: Boolean(refresh) }),
+  },
   agent: {
     send: (payload) => ipcRenderer.invoke('agent:send', payload),
     stop: () => ipcRenderer.invoke('agent:stop'),

@@ -1,7 +1,7 @@
 {
   "name": "fennec-desktop",
   "productName": "Fennec Desktop",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "description": "Local-first coding agent for Fennec models, with device-tiered MoE inference.",
   "main": "electron/main.js",
   "author": {

@@ -8,6 +8,7 @@ const { FennecBackend, listModels } = require('./backend');
 const { Accelerator } = require('./npu');
 const { runTurn, Cancelled } = require('./agent');
 const { resolveInside } = require('./tools');
+const { Outlets } = require('./outlets');
 const { safeExternalUrl } = require('./security');
 const { INSTALLER_URL } = require('./config');
 const { SpeechToText } = require('./stt');
@@ -18,6 +19,11 @@ const isDev = process.env.ELECTRON_DEV === '1';
 const backend = new FennecBackend();
 const accelerator = new Accelerator(backend.config);
 const speech = new SpeechToText(backend.config);
+// Jev and OpenBot are driven by the core service, never from this process.
+const outlets = new Outlets({
+  baseUrl: backend.config.web_url,
+  appToken: process.env.FENNEC_APP_TOKEN || '',
+});
 let win = null;
 let currentTurn = null;
 const pendingApprovals = new Map();
@@ -33,6 +39,8 @@ const defaultSettings = () => ({
   maxTokens: 4096,
   autoApproveWrites: false,
   autoApproveCommands: false,
+  browserOutlets: true,
+  autoApproveBrowser: false,
   recentWorkspaces: [],
   devicePolicy: 'auto',
   npuDevice: 'NPU',
@@ -46,7 +54,9 @@ function loadSettings() {
       // A legacy saved port/model must not override the suite's configured engine.
       port: backend.port, modelDir: backend.config.model || saved.modelDir || '',
       autoApproveWrites: saved.autoApproveWrites === true,
-      autoApproveCommands: saved.autoApproveCommands === true };
+      autoApproveCommands: saved.autoApproveCommands === true,
+      browserOutlets: saved.browserOutlets !== false,
+      autoApproveBrowser: saved.autoApproveBrowser === true };
   } catch {
     return defaultSettings();
   }
@@ -135,7 +145,7 @@ function refreshUpdateInfo(options) {
   });
 }
 
-function buildSystemPrompt(workspace, extraContext) {
+function buildSystemPrompt(workspace, extraContext, outletTools) {
   const parts = [
     'You are Fennec Desktop, a coding agent running entirely on the user\'s own machine.',
     'The model behind you is served by the Colibri engine, which pages expert weights from disk on demand.',
@@ -148,6 +158,10 @@ function buildSystemPrompt(workspace, extraContext) {
     '- Paths are workspace-relative. Never write outside the workspace.',
     '- Report what you changed and what you verified. Do not claim a check passed unless you ran it.',
   ];
+  if (outletTools && outletTools.length) {
+    parts.push(`- ${outletTools.join(' and ')} hand work to a browser agent on this machine. `
+      + 'State the end result you want, not the clicks. Ask before using them and never assume one ran.');
+  }
   if (workspace) parts.push(`\nWorkspace root: ${workspace}`);
   if (extraContext) parts.push(`\nFiles the user attached for context:\n${extraContext}`);
   return parts.join('\n');
@@ -427,6 +441,8 @@ ipcMain.handle('approval:reply', (_e, { id, approved }) => {
   return true;
 });
 
+ipcMain.handle('outlets:status', (_e, { refresh } = {}) => outlets.refresh({ refresh: Boolean(refresh) }));
+
 ipcMain.handle('agent:send', async (_e, { messages, extraContext }) => {
   const settings = loadSettings();
   if (!settings.workspace) throw new Error('open a folder first');
@@ -437,13 +453,23 @@ ipcMain.handle('agent:send', async (_e, { messages, extraContext }) => {
     return { ok: false, error: `The local engine could not start: ${err.message}` };
   }
 
+  // One cheap probe per turn: core caches its own outlet answers, and a service
+  // that is not running leaves the outlet tools out of this turn entirely.
+  // The budget has to outlast core's own probe - it gives OpenBot 5 s before it
+  // calls the outlet dead - or the tools vanish from a machine that has them.
+  let turnOutlets = null;
+  if (settings.browserOutlets !== false) {
+    await outlets.refresh();
+    turnOutlets = outlets;
+  }
+
   const controller = new AbortController();
   currentTurn = controller;
 
-  const approve = ({ id, name, args }) =>
+  const approve = ({ id, name, args, browser }) =>
     new Promise((resolve) => {
       pendingApprovals.set(id, resolve);
-      send('approval:request', { id, name, args });
+      send('approval:request', { id, name, args, browser: browser === true });
     });
 
   try {
@@ -453,10 +479,13 @@ ipcMain.handle('agent:send', async (_e, { messages, extraContext }) => {
       apiKey: backend.apiKey,
       workspace: settings.workspace,
       messages,
-      systemPrompt: buildSystemPrompt(settings.workspace, extraContext),
+      systemPrompt: buildSystemPrompt(
+        settings.workspace, extraContext,
+        (turnOutlets ? turnOutlets.specs() : []).map((spec) => spec.function.name)),
       settings,
       signal: controller.signal,
       approve,
+      outlets: turnOutlets,
       onEvent: (event) => send('agent:event', event),
     });
     return { ok: true, result };

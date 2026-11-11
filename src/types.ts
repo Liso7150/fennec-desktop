@@ -68,10 +68,26 @@ export interface Settings {
   maxTokens: number;
   autoApproveWrites: boolean;
   autoApproveCommands: boolean;
+  browserOutlets: boolean;
+  autoApproveBrowser: boolean;
   recentWorkspaces: string[];
   devicePolicy: string;
   npuDevice: string;
   npuEnabled: boolean;
+}
+
+export interface OutletInfo {
+  present: boolean;
+  note: string;
+  url: string;
+  agents: { id?: string; name?: string }[];
+}
+
+export interface OutletStatus {
+  ok: boolean;
+  summary: string;
+  error: string | null;
+  outlets: { jev: OutletInfo; openbot: OutletInfo } | null;
 }
 
 export interface DeviceProbe {
@@ -201,6 +217,9 @@ declare global {
           error?: string;
         }>;
       };
+      outlets: {
+        status: (refresh?: boolean) => Promise<OutletStatus>;
+      };
       agent: {
         send: (payload: { messages: ChatPayloadMessage[]; extraContext?: string }) => Promise<{
           ok: boolean;
@@ -210,7 +229,7 @@ declare global {
         stop: () => Promise<boolean>;
         approve: (id: string, approved: boolean) => Promise<boolean>;
         onEvent: (cb: (event: AgentEvent) => void) => void;
-        onApproval: (cb: (req: { id: string; name: string; args: Record<string, unknown> }) => void) => void;
+        onApproval: (cb: (req: { id: string; name: string; args: Record<string, unknown>; browser?: boolean }) => void) => void;
       };
       stt: {
         transcribe: (audio: ArrayBuffer, type: string) => Promise<{

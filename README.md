@@ -15,6 +15,7 @@ Electron + React + Vite.
 - **Speech** — dictate with the local faster-whisper sidecar and read answers aloud with the system voices.
 - **Update from GitHub** — the release feed is checked at startup, on window focus and when an engine starts (cached, silent when offline); `Check release` re-queries it and `Update apps from GitHub` fast-forwards the suite checkouts with `git pull --ff-only`.
 - **Path-jailed tools** — file reads, edits, grep and command runs stay inside the opened workspace.
+- **Browser outlets** — `web_task` and `coworker_task` hand one goal to a browser agent on this machine: [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (Jev) drives pages, [OpenBot](https://github.com/CopilotKit/OpenBot) coworkers answer web tasks. The desktop keeps no browser code: it asks the local Fennec service (`/api/outlets`, `/api/outlets/run`), advertises a tool only while that outlet answers, and confirms each run in the approval dialog unless *Run browser tasks without asking* is on. Neither upstream is modified or vendored, and Jev spends the key inside its own checkout.
 - **NPU & accelerator sidecar** — OpenVINO device probe plus the batched workspace code index, off the token path (never a decoder). The app picks the first interpreter that can import OpenVINO — an explicit `FENNEC_PYTHON`, the configured one, or a plain `python` from PATH — and *Install sidecar deps* / *Install embedding model* provision exactly what is missing: pip for `openvino`, `openvino-tokenizers` and `numpy`, then a prebuilt OpenVINO IR embedding model fetched with `huggingface_hub`. No `optimum-cli` export step, so torch/nncf never enter that interpreter. The index file it writes is not consulted by the agent yet: retrieval is still keyword/grep.
 - **Cross-platform builds** — NSIS/MSI, dmg, AppImage/deb, with a Windows/macOS/Linux CI matrix.
 - **Local-only** — models, caches, logs and settings never leave this device.
@@ -64,7 +65,7 @@ device.
 
 ## Layout
 
-- `electron/` — main process, engine backend, agent loop, tools, NPU sidecar.
+- `electron/` — main process, engine backend, agent loop, tools, outlet client, NPU sidecar.
 - `src/` — React renderer.
 - `build/` — packaging resources (icons).
 - `jetbrains/` — moved to its own repo: `Liso7150/fennec-jetbrains`.

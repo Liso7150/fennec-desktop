@@ -9,6 +9,8 @@ const ICONS: Record<string, string> = {
   search_files: '⌕',
   run_command: '❯',
   todo_write: '☑',
+  web_task: '◍',
+  coworker_task: '⇄',
 };
 
 function summarize(call: ToolCall): string {
@@ -16,6 +18,9 @@ function summarize(call: ToolCall): string {
   if (typeof args.path === 'string') return args.path;
   if (typeof args.command === 'string') return args.command;
   if (typeof args.pattern === 'string') return `/${args.pattern}/`;
+  if (typeof args.goal === 'string') {
+    return `${typeof args.url === 'string' && args.url ? `${args.url} · ` : ''}${args.goal}`;
+  }
   if (Array.isArray(args.todos)) return `${(args.todos as unknown[]).length} items`;
   return '';
 }

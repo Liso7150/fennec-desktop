@@ -35,7 +35,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [tab, setTab] = useState<'engine' | 'files'>('engine');
-  const [approval, setApproval] = useState<{ id: string; name: string; args: Record<string, unknown> } | null>(null);
+  const [approval, setApproval] = useState<{ id: string; name: string; args: Record<string, unknown>; browser?: boolean } | null>(null);
   const [tokensPerSecond, setTokensPerSecond] = useState<number | null>(null);
   const [contextSaved, setContextSaved] = useState<{ tokens: number; seconds: number; before: number; after: number } | null>(null);
   const [attached, setAttached] = useState<{ path: string; content: string }[]>([]);
@@ -688,6 +688,12 @@ export default function App() {
         <div className="modal-backdrop">
           <div className="modal">
             <h3>Allow {approval.name.replace(/_/g, ' ')}?</h3>
+            {approval.browser && (
+              <p className="muted tiny">
+                This hands the goal to a browser program on this machine, in its own window, spending whatever
+                key that program is configured with. Fennec does not modify it.
+              </p>
+            )}
             <pre className="modal-args">{JSON.stringify(approval.args, null, 2)}</pre>
             <div className="row gap end">
               <button className="btn ghost" onClick={() => answerApproval(false)}>Deny</button>
