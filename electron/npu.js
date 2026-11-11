@@ -243,17 +243,15 @@ print(json.dumps(out))
 `;
 
 /**
- * Interpreters worth trying, best guess first. The engine venv is only the
- * preferred candidate, not a requirement: a plain `python` from PATH is tried
- * too, and the first one that can actually import OpenVINO wins.
+ * Interpreters worth trying, best guess first: an explicit override, then the
+ * shared configuration, then a plain `python` from PATH. The first one that can
+ * actually import OpenVINO wins.
  */
 function pythonCandidates(config = {}) {
-  const engineRoot = config.engine_root || '';
   const raw = [
     process.env.FENNEC_PYTHON,
     process.env.COLI_PYTHON,
     config.python,
-    engineRoot && path.join(engineRoot, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python'),
     'python',
   ].filter(Boolean);
   const found = [];

@@ -41,12 +41,12 @@ test('findPython prefers the configured interpreter', () => withEnvScrubbed(() =
   assert.strictEqual(findPython({ python: path.join(tempRoot(), 'nope.exe') }), 'python');
 }));
 
-test('findPython falls back to the shared venv under engine_root', () => withEnvScrubbed(() => {
+test('findPython falls back to python on PATH, not an engine venv', () => withEnvScrubbed(() => {
   const root = tempRoot();
   const venv = path.join(root, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
   fs.mkdirSync(path.dirname(venv), { recursive: true });
   fs.writeFileSync(venv, '');
-  assert.strictEqual(findPython({ engine_root: root }), venv);
+  assert.strictEqual(findPython({ engine_root: root }), 'python');
 }));
 
 test('findEmbedModel reads models_root from configuration', () => withEnvScrubbed(() => {

@@ -66,8 +66,9 @@ function loadConfig({ env = process.env, home = os.homedir(), platform = process
       .flatMap((dir) => [p.join(dir, python), ...(platform === 'win32' ? [p.join(dir, `${python}.exe`)] : [])]);
     values.python = (!/[\\/]/.test(python) && candidates.find(exists)) || resolve(python, p.dirname(location));
   } else {
-    const candidates = platform === 'win32' ? ['Scripts/pythonw.exe', 'Scripts/python.exe'] : ['bin/python'];
-    values.python = candidates.map((name) => p.join(values.engine_root, '.venv', name)).find(exists) || null;
+    const names = platform === 'win32' ? ['python.exe', 'python3.exe'] : ['python3', 'python'];
+    const dirs = (env.PATH || env.Path || '').split(platform === 'win32' ? ';' : ':').filter(Boolean);
+    values.python = dirs.flatMap((dir) => names.map((name) => p.join(dir, name))).find(exists) || null;
   }
   // The web workspace is a separate, local core client. Never load it into Electron.
   values.web_url = 'http://127.0.0.1:8787';

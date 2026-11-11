@@ -14,7 +14,7 @@ Electron + React + Vite.
 - **Speech** — dictate with the local faster-whisper sidecar and read answers aloud with the system voices.
 - **Update from GitHub** — the release feed is checked at startup, on window focus and when an engine starts (cached, silent when offline); `Check release` re-queries it and `Update apps from GitHub` fast-forwards the suite checkouts with `git pull --ff-only`.
 - **Path-jailed tools** — file reads, edits, grep and command runs stay inside the opened workspace.
-- **NPU & accelerator sidecar** — OpenVINO device probe plus the batched workspace code index, off the token path (never a decoder). The app picks the first interpreter that can import OpenVINO — the shared venv when it exists, otherwise a plain `python` from PATH — and *Install sidecar deps* / *Install embedding model* provision exactly what is missing: pip for `openvino`, `openvino-tokenizers` and `numpy`, then a prebuilt OpenVINO IR embedding model fetched with `huggingface_hub`. No `optimum-cli` export step, so torch/nncf never enter that interpreter. The index file it writes is not consulted by the agent yet: retrieval is still keyword/grep.
+- **NPU & accelerator sidecar** — OpenVINO device probe plus the batched workspace code index, off the token path (never a decoder). The app picks the first interpreter that can import OpenVINO — an explicit `FENNEC_PYTHON`, the configured one, or a plain `python` from PATH — and *Install sidecar deps* / *Install embedding model* provision exactly what is missing: pip for `openvino`, `openvino-tokenizers` and `numpy`, then a prebuilt OpenVINO IR embedding model fetched with `huggingface_hub`. No `optimum-cli` export step, so torch/nncf never enter that interpreter. The index file it writes is not consulted by the agent yet: retrieval is still keyword/grep.
 - **Cross-platform builds** — NSIS/MSI, dmg, AppImage/deb, with a Windows/macOS/Linux CI matrix.
 - **Local-only** — models, caches, logs and settings never leave this device.
 
@@ -34,7 +34,7 @@ npm run dist:mac     # macOS dmg
 npm run dist:linux   # Linux AppImage/deb
 ```
 
-The app spawns the Colibri engine from the shared venv and talks to its
+The app spawns the Colibri engine with `python` from PATH and talks to its
 OpenAI-compatible server; the agent loop and tools live in `electron/`.
 
 ## On-demand engine

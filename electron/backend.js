@@ -194,7 +194,7 @@ class FennecBackend {
     const issues = [];
     if (this.configError) issues.push(this.configError);
     if (!this.runtime) issues.push(`Engine checkout missing: ${this.cli} and ${this.server}. Run the shared installer.`);
-    if (!this.python) issues.push(`Shared Python runtime missing under ${this.config.engine_root}/.venv. Run the installer or set FENNEC_PYTHON.`);
+    if (!this.python) issues.push('No `python` on PATH. Install Python 3.10+, run the shared installer, or set FENNEC_PYTHON.');
     if (!modelDir || !exists(path.join(modelDir, 'config.json'))) issues.push('Choose an installed model or set model in the shared configuration. Models are not bundled or downloaded by this app.');
     return { issues, configPath: this.config.configPath, installerUrl: INSTALLER_URL };
   }
