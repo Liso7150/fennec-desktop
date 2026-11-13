@@ -16,30 +16,37 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            script: dist:exe
+            exe: fennec-desktop.exe
           - os: macos-latest
-            script: dist:mac
+            exe: fennec-desktop
           - os: ubuntu-latest
-            script: dist:linux
+            exe: fennec-desktop
     runs-on: ${{ matrix.os }}
     steps:
+      # The app consumes fennec-client and fennec-economy by path, so the
+      # native build fetches the repos together, exactly as the installer does.
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - name: Install dependencies
-        run: npm install
-      - name: Build renderer + package
-        run: npm run ${{ matrix.script }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Upload artifacts
+          path: fennec-desktop
+      - uses: actions/checkout@v4
+        with:
+          repository: Liso7150/fennec-core
+          path: fennec-core
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install windowing deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+      - name: Test
+        working-directory: fennec-desktop
+        run: cargo test --release
+      - name: Build
+        working-directory: fennec-desktop
+        run: cargo build --release
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: fennec-desktop-${{ matrix.os }}
-          path: |
-            release/*.exe
-            release/*.dmg
-            release/*.AppImage
-            release/*.deb
-          if-no-files-found: ignore
+          path: fennec-desktop/target/release/${{ matrix.exe }}

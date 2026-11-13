@@ -1,9 +1,7 @@
+/target/
 __pycache__/
 *.pyc
 *.pyo
-node_modules/
-dist/
-release*/
 .venv/
 *.log
 .DS_Store
@@ -11,4 +9,3 @@ release*/
 .pytest_cache/
 # The OpenVINO NPU plugin writes this next to the working directory on every compile.
 kernel.errors.txt
-scratch-*.js

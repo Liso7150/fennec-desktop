@@ -1,77 +1,82 @@
 ![Fennec Desktop 2.5.0 — a local-first coding agent as a native Rust app (egui), talking to the local Fennec inference engine. Nothing is hosted. No Electron, no Node, no web view. Windows macOS Linux, MIT license.](docs/hero.png)
 
-Nothing is hosted. The model, the agent loop, the tools and the index run on this device, and
-the engine starts only when a message needs it. Inference comes from
-[Fennec](https://github.com/Liso7150/fennec), the suite's native Rust engine;
-The engine is [Fennec](https://github.com/Liso7150/fennec) (the Colibri replacement, `D:/Fennec`). Core logic (compaction/outlets/ACP/preflight) is **reused** from the fennec-core crates and fennec-cli's fennec-rs — not reimplemented here.
+Fennec is a native Rust desktop app (egui/eframe) for the suite. The model, the agent loop,
+the tools and the workspace discovery all run on this device; nothing is hosted, no account,
+no API key, no cloud. It speaks to the two loopback services the suite already owns —
+the [fennec-core](https://github.com/Liso7150/fennec-core) agent server and the
+[Fennec](https://github.com/Liso7150/fennec) inference engine — and presents them in one
+three-pane window.
 
-**Rewritten from Electron/React/TypeScript to native Rust.** The previous JS/TS app is preserved
-on the `legacy-electron` branch; the tracked source is now Rust only.
+The app was rewritten from Electron/React/TypeScript to native Rust. The previous JS/TS
+source is preserved on the `legacy-electron` branch; the tracked source is Rust only.
 
 ## At a glance
 
-| Language | UI | Backend | Parity tests | Default engine URL |
+| UI | Backend | Compaction | Tests | Platforms |
 |---|---|---|---|---|
-| Rust (egui/eframe) | native window | in-process Rust (config/engine/context/outlets/ACP) | 13 (44 handlers) | `http://127.0.0.1:8184` |
+| native window, egui/eframe | agent server `127.0.0.1:8787`, engine SSE `127.0.0.1:8184` | `fennec-economy`, in-process | 10 | Windows, macOS, Linux |
 
 ## Architecture
 
 ```
-Native window (egui/eframe)
-   | in-process calls (no IPC, no web view)
-   v
-Rust backend (fennec-desktop-shell)
-   |- agent loop ---- path-jailed tools (read / edit / grep / run)
-   |- context ------- fennec-economy (Rust compaction, in-process)
-   |- outlets ------- fennec-outlets (loopback gate, redaction)
-   `- engine -------- HTTP :8184 --> Fennec engine (spawned on first message)
+fennec-desktop (this repo)          fennec-core/src (path dependency)
+  src/main.rs    warm-dark UI   →    fennec-client   agent server + engine SSE clients
+  src/events.rs  timeline model      +               suite / repos.json discovery, git context
+  src/fonts.rs   font lookup     →    fennec-economy  context compaction
 ```
 
-## Features (every Electron handler ported)
+Nothing here re-implements a protocol. The HTTP/SSE contract, the workspace list and the
+engine/model resolution come from `fennec-client`, which reads
+[fennec-environment-setup/repos.json](https://github.com/Liso7150/fennec-environment-setup)
+for the suite root and repo set — the same manifest the installer fetches from, so what the
+selector shows is what `fennec update` keeps current.
 
-| Area | Behavior |
+## What it does
+
+| Pane | Behavior |
 |---|---|
-| Chat and agent turns | Streamed answers, bounded tool loop, per-run approvals; read-only until writes/shell are allowed |
-| On-demand engine | Attaches to a running engine, otherwise spawns one on the first message; stops the child it owns on quit |
-| File tree / read | Path-jailed to the opened workspace |
-| Models | Scans for `config.json` + weights |
-| Outlets | `web_task` / `coworker_task` via the local core service; loopback-gated, confirmed per run |
-| Setup wizard | Detect / validate / scan / save; writes config atomically; API keys stay in `FENNEC_API_KEY` |
-| NPU / STT | Structured delegations to the engine sidecars (probe/index, faster-whisper) |
-| Updates | Release feed check; `Update apps from GitHub` runs `git pull --ff-only` on suite checkouts |
+| Left rail | Fennec brand, real repository selector (manifest `repos[]` that exist on disk), Coding / My Attention / New Task / Search, recent sessions from the agent server, repo · branch · changed footer |
+| Center | Task header, structured timeline: streamed reasoning and answers, one card per tool call (category, title, Running / Complete / Warning / Failed, duration, arguments, expandable result), copyable code blocks, persistent composer, the loop's three jail switches (edits / commands / web) |
+| Right | Environment (core, engine, model, context window, tokens/s, outlets — live values), Subagents, Artifacts (files the run actually wrote), Research, context compaction |
 
-Each maps to a Rust function in `rust/fennec-desktop-shell/src/parity.rs`; a parity test asserts
-all 44 handlers resolve (never 404). Hardware surfaces (NPU/STT) return structured delegations.
+> [!NOTE]
+> Panels report what the backend actually exposes. With only the engine running the app is in
+> direct chat mode, so the tool timeline is empty and says so; features with no backend
+> registry are shown as unavailable instead of being faked.
 
-## Build & run
+## Build and run
+
+The app path-depends on the sibling `fennec-core` checkout, so fetch the repos together first
+(`fennec update`, or the installer's bootstrap), then:
 
 ```bash
-cd rust
-cargo build --release --offline
-./target/release/fennec-desktop-shell      # native window
-cargo test --release --offline             # 13 parity tests
+cargo build --release --offline        # ./target/release/fennec-desktop(.exe)
+cargo test  --release --offline        # 10 tests
 ```
 
-The legacy Electron app (JS/TS, 106 tests) lives on the `legacy-electron` branch for reference.
+The engine and the agent server start independently of the app; the Environment panel offers
+`Start agent loop` when the server is not reachable. CI checks out `fennec-core` beside this
+repo and runs the same two commands.
 
 ## Which engine answers
 
-Resolution order: native Fennec binary (`target/release`, `target/debug`, engine root) first,
-then a legacy Colibri checkout (`c/coli`) only as a last resort. An engine the app spawned is stopped with all
-descendants on quit; one already running is attached to and left alone.
+Resolution order comes from `fennec-client`: the manifest's `engine_root` first, then the home
+engine checkout, then a legacy Colibri checkout only as a last resort. An already-running
+engine is attached to, never restarted.
 
 ## Security posture
 
-Tool paths are jailed to the opened workspace; outlets are loopback-gated and confirmed per
-run; no secret is ever written to the config. The native UI has no web DOM, so no XSS surface.
+Tool paths are jailed to the selected workspace; writing, shell and web each stay off until
+the corresponding switch is set in the composer, and those flags are the agent loop's own, not
+app-side decoration. No secret is read, written or displayed. The UI has no web view, so there
+is no DOM and no script injection surface. Both services are loopback-only.
 
 ## Credits
 
 Engine: [Liso7150/fennec](https://github.com/Liso7150/fennec). Base idea:
 [JustVugg/colibri](https://github.com/JustVugg/colibri) — device-tiered MoE inference.
-Outlets: [jev-ultrafast](https://github.com/browser-use/jev-ultrafast),
-[OpenBot](https://github.com/CopilotKit/OpenBot). Part of the
-[Fennec suite](https://github.com/Liso7150/fennec-environment-setup).
+Agent server and outlets: [Liso7150/fennec-core](https://github.com/Liso7150/fennec-core).
+Part of the [Fennec suite](https://github.com/Liso7150/fennec-environment-setup).
 
 ## License
 

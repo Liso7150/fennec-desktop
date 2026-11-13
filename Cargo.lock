@@ -1152,22 +1152,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "fennec-acp"
+name = "fennec-client"
 version = "2.5.0"
 dependencies = [
- "fennec-pyjson",
+ "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "fennec-desktop-shell"
+name = "fennec-desktop"
 version = "2.5.0"
 dependencies = [
  "eframe",
- "fennec-acp",
+ "fennec-client",
  "fennec-economy",
- "fennec-outlets",
- "serde",
+ "image",
  "serde_json",
 ]
 
@@ -1179,10 +1178,6 @@ dependencies = [
  "serde_json",
  "sha2",
 ]
-
-[[package]]
-name = "fennec-outlets"
-version = "2.5.0"
 
 [[package]]
 name = "fennec-pyjson"
