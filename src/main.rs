@@ -14,7 +14,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 use eframe::egui;
 use fennec_client::engine::{ChatDelta, Engine};
-use fennec_client::{git, suite, Core};
+use fennec_client::{git, suite, Core, Outlet};
 use fennec_desktop::events::{self, ChatMessage, Event, Role, Task, TaskStatus, Timeline, ToolStatus};
 use fennec_desktop::fonts;
 use serde_json::{json, Value};
@@ -67,7 +67,7 @@ struct Env {
     model: String,
     ctx: String,
     tok_s: String,
-    outlets: String,
+    outlets: Vec<Outlet>,
     outlets_known: bool,
 }
 
@@ -132,7 +132,7 @@ impl App {
                 env.core_workspace = h["workspace"].as_str().unwrap_or("").to_string();
                 if let Some(o) = core0.outlets() {
                     env.outlets_known = true;
-                    env.outlets = outlets_line(&o);
+                    env.outlets = o.list().into_iter().cloned().collect();
                 }
                 let mut tasks = Vec::new();
                 for sess in core0.sessions() {
@@ -564,8 +564,12 @@ impl App {
                 ui.label(egui::RichText::new("Unavailable — the backend has no search-source registry.")
                     .size(11.5).color(TEXT2));
             }
-            let outlets = if self.env.outlets_known { self.env.outlets.clone() } else { "Outlets: unknown (agent loop offline)".into() };
-            ui.label(egui::RichText::new(outlets).size(11.0).color(TEXT2));
+            for (ready, text) in outlet_rows(&self.env) {
+                ui.horizontal(|ui| {
+                    ui.colored_label(if ready { OK } else { TEXT2 }, "●");
+                    ui.label(egui::RichText::new(text).size(11.0).color(TEXT2));
+                });
+            }
             ui.separator();
 
             ui.label(egui::RichText::new("Verification").size(11.0).color(TEXT2).strong());
@@ -857,19 +861,17 @@ fn time_ago(stamp: &str) -> String {
     }
 }
 
-fn outlets_line(o: &Value) -> String {
-    let mut parts = Vec::new();
-    for (key, label) in [("jev", "Jev"), ("openbot", "OpenBot")] {
-        if let Some(v) = o.get(key) {
-            let ready = v.get("available").and_then(|a| a.as_bool()).unwrap_or(false);
-            parts.push(format!("{label}: {}", if ready { "ready" } else { "not installed" }));
-        }
+/// One `(installed, line)` row per outlet the agent server reported. The three
+/// states are three different claims: never probed, probed but empty, and
+/// probed with real data — so an offline loop can never read as "not installed".
+fn outlet_rows(env: &Env) -> Vec<(bool, String)> {
+    if !env.outlets_known {
+        return vec![(false, "Outlets: unknown (agent loop offline)".into())];
     }
-    if parts.is_empty() {
-        serde_json::to_string(o).unwrap_or_default().chars().take(80).collect::<String>()
-    } else {
-        parts.join(" · ")
+    if env.outlets.is_empty() {
+        return vec![(false, "Outlets: the agent server named none".into())];
     }
+    env.outlets.iter().map(|o| (o.present, format!("{}: {}", o.label, o.detail))).collect()
 }
 
 impl eframe::App for App {
@@ -1004,11 +1006,14 @@ mod tests {
     }
 
     #[test]
-    fn outlets_line_names_only_what_the_backend_reports() {
-        assert_eq!(outlets_line(&json!({"jev": {"available": true}, "openbot": {"available": false}})),
-                   "Jev: ready · OpenBot: not installed");
-        assert_eq!(outlets_line(&json!({"jev": {"available": true}})), "Jev: ready");
-        assert!(!outlets_line(&json!({})).is_empty());
+    fn the_outlet_rail_keeps_not_probed_apart_from_probed_empty() {
+        assert_eq!(outlet_rows(&Env::default()), vec![(false, "Outlets: unknown (agent loop offline)".to_string())]);
+        let mut env = Env::default();
+        env.outlets_known = true;
+        assert_eq!(outlet_rows(&env), vec![(false, "Outlets: the agent server named none".to_string())]);
+        env.outlets = vec![Outlet { id: "jev", label: "Jev", present: false,
+                                    detail: "not installed".into(), agents: Vec::new() }];
+        assert_eq!(outlet_rows(&env), vec![(false, "Jev: not installed".to_string())]);
     }
 
     #[test]
