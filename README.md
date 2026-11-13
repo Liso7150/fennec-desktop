@@ -3,7 +3,7 @@
 Nothing is hosted. The model, the agent loop, the tools and the index run on this device, and
 the engine starts only when a message needs it. Inference comes from
 [Fennec](https://github.com/Liso7150/fennec), the suite's native Rust engine;
-[Colibri](https://github.com/JustVugg/colibri) still works as a fallback.
+The engine is [Fennec](https://github.com/Liso7150/fennec) (the Colibri replacement, `D:/Fennec`). Core logic (compaction/outlets/ACP/preflight) is **reused** from the fennec-core crates and fennec-cli's fennec-rs — not reimplemented here.
 
 **Rewritten from Electron/React/TypeScript to native Rust.** The previous JS/TS app is preserved
 on the `legacy-electron` branch; the tracked source is now Rust only.
@@ -57,7 +57,7 @@ The legacy Electron app (JS/TS, 106 tests) lives on the `legacy-electron` branch
 ## Which engine answers
 
 Resolution order: native Fennec binary (`target/release`, `target/debug`, engine root) first,
-then a legacy Colibri checkout (`c/coli`). An engine the app spawned is stopped with all
+then a legacy Colibri checkout (`c/coli`) only as a last resort. An engine the app spawned is stopped with all
 descendants on quit; one already running is attached to and left alone.
 
 ## Security posture

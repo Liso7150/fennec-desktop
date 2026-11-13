@@ -151,10 +151,12 @@ pub fn check_python(python: &str) -> Value {
 }
 
 pub fn engine_binary() -> PathBuf {
-    let root = home().join("Colibri");
-    for rel in ["target/release/fennec.exe", "target/debug/fennec.exe", "fennec.exe"] {
-        let p = root.join(rel);
-        if p.is_file() { return p; }
+    // Fennec (the Colibri replacement) is the engine; prefer D:/Fennec builds.
+    for root in [PathBuf::from("D:/Fennec"), home().join("Fennec"), home().join("Colibri")] {
+        for rel in ["target/release/fennec.exe", "target/debug/fennec.exe", "fennec.exe"] {
+            let p = root.join(rel);
+            if p.is_file() { return p; }
+        }
     }
     PathBuf::from("fennec")
 }
@@ -191,14 +193,55 @@ pub fn open_external(url: &str) -> Value {
     json!({ "opened": url })
 }
 
+// Thin client to the Fennec engine (the Colibri replacement at D:/Fennec).
+// Only a HTTP client lives here; the engine itself is the fennec binary.
+fn engine_url() -> (String, String) {
+    let cfg = home().join(".fennec").join("config.json");
+    let v: Value = std::fs::read_to_string(&cfg).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
+    let url = v["engine_url"].as_str().unwrap_or("http://127.0.0.1:8184").to_string();
+    let key = std::env::var("FENNEC_API_KEY").or_else(|_| std::env::var("COLI_API_KEY")).unwrap_or_else(|_| "local".into());
+    (url, key)
+}
+
+fn http_post(base: &str, route: &str, key: &str, body: &str) -> Result<(u16, String), String> {
+    use std::io::{Read, Write};
+    let rest = base.trim_start_matches("http://").trim_start_matches("https://");
+    let (hostport, _) = rest.split_once('/').unwrap_or((rest, ""));
+    let (host, port) = match hostport.rsplit_once(':') { Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(80)), None => (hostport.to_string(), 80) };
+    let mut s = std::net::TcpStream::connect(format!("{host}:{port}")).map_err(|e| e.to_string())?;
+    s.set_read_timeout(Some(std::time::Duration::from_secs(60))).ok();
+    let req = format!("POST {route} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {key}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    let mut raw = Vec::new(); s.read_to_end(&mut raw).map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let status: u16 = text.lines().next().and_then(|l| l.split_whitespace().nth(1)).and_then(|x| x.parse().ok()).unwrap_or(0);
+    let body = text.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+    Ok((status, body))
+}
+
 pub fn agent_send(messages: &Value) -> Result<Value, String> {
-    let c = crate::config::load_config(&|k| std::env::var(k).ok(), &home(), cfg!(windows), &|p| p.exists(), &|p| std::fs::read_to_string(p).ok())?;
-    let body = serde_json::json!({ "model": c.model, "messages": messages, "stream": false, "max_tokens": 256 });
-    let r = crate::engine::http_post(&c.engine_url, "/v1/chat/completions", &c.api_key, &body.to_string(), 60000);
-    if r.status != 200 { return Err(format!("engine {}: {}", r.status, r.error)); }
-    let v: Value = serde_json::from_str(&r.body).map_err(|e| e.to_string())?;
+    let (url, key) = engine_url();
+    let body = serde_json::json!({ "messages": messages, "stream": false, "max_tokens": 256 });
+    let (status, raw) = http_post(&url, "/v1/chat/completions", &key, &body.to_string())?;
+    if status != 200 { return Err(format!("engine {status}")); }
+    let v: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     let reply = v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
     Ok(json!({ "reply": reply }))
+}
+
+// Core logic REUSED from fennec-core crates (same as fennec-cli's fennec-rs).
+pub fn context_compact(messages: &Value) -> Value {
+    let arr = messages.as_array().cloned().unwrap_or_default();
+    let opts = fennec_economy::Options::sized(fennec_economy::DEFAULT_BUDGET_CHARS, fennec_economy::DEFAULT_RESULT_CHARS);
+    let (payload, stats) = fennec_economy::compact(&arr, &opts, &mut std::collections::HashMap::new());
+    json!({ "messages": payload, "stats": { "chars_before": stats.chars_before, "chars_after": stats.chars_after, "elided": stats.elided, "deduped": stats.deduped } })
+}
+
+pub fn outlets_status(origins: &Value) -> Value {
+    let arr = origins.as_array().cloned().unwrap_or_default();
+    Value::Array(arr.iter().filter_map(|o| o.as_str()).map(|o| json!({
+        "origin": o, "loopback": fennec_outlets::loopback(o), "blocked": fennec_outlets::blocked_host(o),
+    })).collect())
 }
 
 pub fn dispatch(cmd: &str, args: &Value) -> Option<Result<Value, String>> {
@@ -239,6 +282,8 @@ pub fn dispatch(cmd: &str, args: &Value) -> Option<Result<Value, String>> {
         "approval_reply" => Some(Ok(json!({ "id": args.get("id"), "approved": args.get("approved") }))),
         "agent_stop" => Some(Ok(json!({ "stopped": true }))),
         "agent_send" => Some(agent_send(args.get("messages").unwrap_or(&json!([])))),
+        "context_compact" => Some(Ok(context_compact(args.get("messages").unwrap_or(&json!([]))))),
+        "outlets_status" => Some(Ok(outlets_status(args.get("origins").unwrap_or(&json!([]))))),
         _ => None,
     }
 }
