@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Rust desktop shell: the Electron agent logic (config, engine lifecycle, context, outlets, ACP) over HTTP, serving the web renderer and driving a bundled Chromium. Replaces fennec-desktop/electron/*.js."
+description = "Native Rust desktop app (egui): the Electron agent logic (config, engine lifecycle, context, outlets, ACP) as a native GUI. Replaces fennec-desktop/electron/*.js and the React renderer."
 
 [dependencies]
 serde = { workspace = true }
@@ -12,6 +12,7 @@ serde_json = { workspace = true }
 fennec-economy = { workspace = true }
 fennec-outlets = { workspace = true }
 fennec-acp = { workspace = true }
+eframe = { workspace = true }
 
 [[bin]]
 name = "fennec-desktop-shell"

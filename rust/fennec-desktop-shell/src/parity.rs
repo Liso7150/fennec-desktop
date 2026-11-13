@@ -191,6 +191,16 @@ pub fn open_external(url: &str) -> Value {
     json!({ "opened": url })
 }
 
+pub fn agent_send(messages: &Value) -> Result<Value, String> {
+    let c = crate::config::load_config(&|k| std::env::var(k).ok(), &home(), cfg!(windows), &|p| p.exists(), &|p| std::fs::read_to_string(p).ok())?;
+    let body = serde_json::json!({ "model": c.model, "messages": messages, "stream": false, "max_tokens": 256 });
+    let r = crate::engine::http_post(&c.engine_url, "/v1/chat/completions", &c.api_key, &body.to_string(), 60000);
+    if r.status != 200 { return Err(format!("engine {}: {}", r.status, r.error)); }
+    let v: Value = serde_json::from_str(&r.body).map_err(|e| e.to_string())?;
+    let reply = v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
+    Ok(json!({ "reply": reply }))
+}
+
 pub fn dispatch(cmd: &str, args: &Value) -> Option<Result<Value, String>> {
     let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
     match cmd {
@@ -228,6 +238,7 @@ pub fn dispatch(cmd: &str, args: &Value) -> Option<Result<Value, String>> {
         "update_open" => Some(Ok(open_external(s("value")))),
         "approval_reply" => Some(Ok(json!({ "id": args.get("id"), "approved": args.get("approved") }))),
         "agent_stop" => Some(Ok(json!({ "stopped": true }))),
+        "agent_send" => Some(agent_send(args.get("messages").unwrap_or(&json!([])))),
         _ => None,
     }
 }
