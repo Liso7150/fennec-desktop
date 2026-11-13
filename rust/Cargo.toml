@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["fennec-desktop-shell"]
+
+[workspace.package]
+version = "2.5.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Liso7150/fennec-desktop"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+fennec-acp = { path = "../../fennec-core/rust/fennec-acp" }
+fennec-economy = { path = "../../fennec-core/rust/fennec-economy" }
+fennec-outlets = { path = "../../fennec-core/rust/fennec-outlets" }
+fennec-preflight = { path = "../../fennec-core/rust/fennec-preflight" }
+fennec-pyjson = { path = "../../fennec-core/rust/fennec-pyjson" }
+
+[profile.release]
+opt-level = 3
