@@ -36,7 +36,7 @@ selector shows is what `fennec update` keeps current.
 | Pane | Behavior |
 |---|---|
 | Left rail | Fennec brand, real repository selector (manifest `repos[]` that exist on disk), Coding / My Attention / New Task / Search, recent sessions from the agent server, repo · branch · changed footer |
-| Center | Task header, structured timeline: streamed reasoning and answers, one card per tool call (category, title, Running / Complete / Warning / Failed, duration, arguments, expandable result), copyable code blocks, persistent composer, the loop's three jail switches (edits / commands / web) |
+| Center | Task header, structured timeline: streamed reasoning and answers, one card per tool call (category, title, Running / Complete / Warning / Failed, duration, arguments, expandable result), one card per gated call (risk, reason, the four answers), copyable code blocks, persistent composer, the loop's four controls (edits / commands / web / ask each) |
 | Right | Environment (core, engine, model, vision, context window, tokens/s, outlets — live values), Subagents, Artifacts (files the run actually wrote), Research, context compaction |
 
 > [!NOTE]
@@ -56,7 +56,7 @@ The app path-depends on the sibling `fennec-core` checkout, so fetch the repos t
 
 ```bash
 cargo build --release --offline        # ./target/release/fennec-desktop(.exe)
-cargo test  --release --offline        # 21 tests
+cargo test  --release --offline        # 33 tests
 ```
 
 The engine and the agent server start independently of the app; the Environment panel offers
@@ -78,8 +78,10 @@ engine is attached to, never restarted.
 
 Tool paths are jailed to the selected workspace; writing, shell and web each stay off until
 the corresponding switch is set in the composer, and those flags are the agent loop's own, not
-app-side decoration. No secret is read, written or displayed. The UI has no web view, so there
-is no DOM and no script injection surface. Both services are loopback-only.
+app-side decoration. A fourth switch (ask each) lifts the flags and puts every gated call to
+you instead — the run waits on the answer, and a timeout or cancel is a rejection. No secret
+is read, written or displayed. The UI has no web view, so there is no DOM and no script
+injection surface. Both services are loopback-only.
 
 ## Credits
 
