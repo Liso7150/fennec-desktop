@@ -82,14 +82,14 @@ pub fn install(ctx: &egui::Context) -> (bool, bool) {
     let mut prop = false;
     if let Some(p) = locate(MONO) {
         if let Ok(bytes) = std::fs::read(&p) {
-            defs.font_data.insert("fennec-mono".into(), FontData::from_owned(bytes));
+            defs.font_data.insert("fennec-mono".into(), std::sync::Arc::new(FontData::from_owned(bytes)));
             defs.families.entry(FontFamily::Monospace).or_default().insert(0, "fennec-mono".into());
             mono = true;
         }
     }
     if let Some(p) = locate(PROPORTIONAL) {
         if let Ok(bytes) = std::fs::read(&p) {
-            defs.font_data.insert("fennec-ui".into(), FontData::from_owned(bytes));
+            defs.font_data.insert("fennec-ui".into(), std::sync::Arc::new(FontData::from_owned(bytes)));
             defs.families.entry(FontFamily::Proportional).or_default().insert(0, "fennec-ui".into());
             prop = true;
         }

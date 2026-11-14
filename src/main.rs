@@ -592,7 +592,7 @@ impl App {
         ui.label(egui::RichText::new("WORKSPACE").size(10.5).color(TEXT2));
         let paths = self.workspaces.clone();
         let name = self.workspace_name();
-        egui::ComboBox::from_id_source("workspace").selected_text(name).width(212.0).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("workspace").selected_text(name).width(212.0).show_ui(ui, |ui| {
             for (i, p) in paths.iter().enumerate() {
                 let label = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 if ui.selectable_value(&mut self.ws, i, label).clicked() {
@@ -619,7 +619,7 @@ impl App {
         }
         ui.separator();
         ui.label(egui::RichText::new("RECENT TASKS").size(10.5).color(TEXT2));
-        egui::ScrollArea::vertical().id_source("tasks").max_height(340.0).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("tasks").max_height(340.0).show(ui, |ui| {
             let ids: Vec<String> = self.tasks.iter()
                 .filter(|t| match self.nav {
                     Nav::Coding => true,
@@ -658,7 +658,7 @@ impl App {
     }
 
     fn right_panel(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().id_source("context").show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("context").show(ui, |ui| {
             ui.label(egui::RichText::new("Environment").size(11.0).color(TEXT2).strong());
             let runtime = format!("Rust · egui · {}", std::env::consts::OS);
             let loop_state = if self.env.core_up { "online".to_string() } else { "offline".to_string() };
@@ -805,9 +805,9 @@ impl App {
         // reserves its own height: a ScrollArea with auto_shrink off takes the
         // whole central rect, and anything added after it lands below the edge.
         let mut send_now = false;
-        egui::TopBottomPanel::bottom("composer")
-            .frame(egui::Frame::none().fill(PANEL).rounding(RADIUS_RAISED).inner_margin(10.0))
-            .show_inside(ui, |ui| {
+        egui::Panel::bottom("composer")
+            .frame(egui::Frame::default().fill(PANEL).corner_radius(RADIUS_RAISED).inner_margin(10.0))
+            .show(ui, |ui| {
                 ui.add(egui::TextEdit::multiline(&mut self.composer)
                     .desired_rows(2).hint_text("Ask Fennec to inspect, edit, test, or explain your code")
                     .desired_width(f32::INFINITY));
@@ -877,14 +877,14 @@ impl App {
             } else {
                 "No backend reachable — run `fennec serve` (engine) or `fennec-agent serve` (agent loop)."
             };
-            egui::Frame::none().fill(HOVER).rounding(RADIUS).inner_margin(8.0).show(ui, |ui| {
+            egui::Frame::default().fill(HOVER).corner_radius(RADIUS).inner_margin(8.0).show(ui, |ui| {
                 ui.label(egui::RichText::new(note).size(12.0).color(WARN));
             });
         }
         ui.separator();
         let id = self.selected.clone();
         let tl = self.timelines.entry(id).or_default().clone();
-        let out = egui::ScrollArea::vertical().id_source("timeline").stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
+        let out = egui::ScrollArea::vertical().id_salt("timeline").stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
             if tl.messages.is_empty() && tl.tools.is_empty() && tl.summary.is_empty() {
                 ui.label(egui::RichText::new("Nothing has happened in this task yet. The timeline fills as the loop reads, edits, runs and tests.")
                     .size(13.0).color(TEXT2));
@@ -910,7 +910,7 @@ impl App {
                 render_rich(ui, &tl.streaming_text, false);
             }
             if !tl.plan.is_empty() {
-                egui::Frame::none().fill(PANEL).rounding(RADIUS).inner_margin(8.0).show(ui, |ui| {
+                egui::Frame::default().fill(PANEL).corner_radius(RADIUS).inner_margin(8.0).show(ui, |ui| {
                     ui.label(egui::RichText::new("Plan").size(12.0).strong().color(TEXT2));
                     for p in &tl.plan {
                         ui.label(egui::RichText::new(format!("{}  {}", if p.done { "✓" } else { "→" }, p.content))
@@ -925,7 +925,7 @@ impl App {
             let mut answer: Option<(String, String)> = None;
             for card in &tl.approvals {
                 let live = card.state == events::ApprovalState::Pending && answer.is_none();
-                egui::Frame::none().fill(SURFACE).rounding(RADIUS).inner_margin(egui::Margin::symmetric(8.0, 6.0)).show(ui, |ui| {
+                egui::Frame::default().fill(SURFACE).corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(&card.category).monospace().size(10.0).color(BG).background_color(risk_color(&card.risk)));
                         ui.label(egui::RichText::new(&card.title).size(12.5).color(TEXT));
@@ -972,7 +972,7 @@ impl App {
             let mut toggle: Option<String> = None;
             for card in &tl.tools {
                 let open = self.expanded.contains(&card.id);
-                egui::Frame::none().fill(SURFACE).rounding(RADIUS).inner_margin(egui::Margin::symmetric(8.0, 6.0)).show(ui, |ui| {
+                egui::Frame::default().fill(SURFACE).corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
                     ui.push_id(&card.id, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(&card.category).monospace().size(10.0).color(BG).background_color(BRAND));
@@ -995,8 +995,8 @@ impl App {
                     });
                 });
                 if open && !card.output.is_empty() {
-                    egui::Frame::none().fill(BG).rounding(RADIUS).inner_margin(8.0).show(ui, |ui| {
-                        egui::ScrollArea::vertical().id_source(format!("out-{}", card.id)).max_height(160.0).show(ui, |ui| {
+                    egui::Frame::default().fill(BG).corner_radius(RADIUS).inner_margin(8.0).show(ui, |ui| {
+                        egui::ScrollArea::vertical().id_salt(format!("out-{}", card.id)).max_height(160.0).show(ui, |ui| {
                             ui.label(egui::RichText::new(&card.output).monospace().size(11.5).color(TEXT));
                         });
                     });
@@ -1004,7 +1004,7 @@ impl App {
                 ui.add_space(6.0);
             }
             if !tl.summary.is_empty() {
-                egui::Frame::none().fill(PANEL).rounding(RADIUS).inner_margin(10.0).show(ui, |ui| {
+                egui::Frame::default().fill(PANEL).corner_radius(RADIUS).inner_margin(10.0).show(ui, |ui| {
                     ui.label(egui::RichText::new("Summary").size(11.0).color(TEXT2).strong());
                     ui.label(egui::RichText::new(&tl.summary).size(13.0).color(OK));
                 });
@@ -1029,13 +1029,13 @@ impl App {
             }
         });
         let last = out.content_size.y - out.inner_rect.height();
-        self.timeline_off_end = out.state.offset.y < last - 24.0;
+        self.timeline_off_end = last > 24.0 && out.content_size.y > out.inner_rect.height() * 1.5;
     }
 
     fn overlays(&mut self, ctx: &egui::Context) {
         if let Some(a) = self.preview.clone() {
             let mut close = false;
-            egui::Window::new(format!("{}  ({})", a.name, a.change)).default_width(620.0).show(ctx, |ui| {
+            egui::Window::new(format!("{}  ({})", a.name, a.change)).default_size([620.0, 500.0]).show(ctx, |ui| {
                 ui.label(egui::RichText::new(format!("status: {}", a.status)).monospace().size(11.0).color(TEXT2));
                 ui.label(egui::RichText::new(&a.name).monospace().size(11.0).color(TEXT2));
                 let stale = self.diff.as_ref().map(|d| Some(d.path.as_str()) != a.path.as_deref()).unwrap_or(false);
@@ -1067,12 +1067,12 @@ impl App {
                     ui.label(egui::RichText::new("Asking git…").size(11.5).color(TEXT2));
                 } else if let Some(d) = self.diff.as_ref().filter(|d| d.text.is_some()) {
                     let text = d.text.clone().unwrap_or_default();
-                    egui::ScrollArea::vertical().id_source("diff").max_height(360.0).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("diff").max_height(360.0).show(ui, |ui| {
                         render_diff(ui, &text);
                     });
                     let copy = text.clone();
                     if ui.small_button("copy diff").clicked() {
-                        ui.output_mut(|o| o.copied_text = copy);
+                        ui.ctx().copy_text(copy);
                     }
                 } else {
                     if let Some(d) = self.diff.as_ref() {
@@ -1092,7 +1092,7 @@ impl App {
         }
         if self.search_open {
             let mut close = false;
-            egui::Window::new("Search tasks").default_width(420.0).show(ctx, |ui| {
+            egui::Window::new("Search tasks").default_size([420.0, 300.0]).show(ctx, |ui| {
                 ui.text_edit_singleline(&mut self.search);
                 let q = self.search.to_lowercase();
                 let hits: Vec<Task> = self.tasks.iter()
@@ -1123,6 +1123,7 @@ impl App {
         // scrolls up; this is how they get back without dragging.
         if self.timeline_off_end && self.nav == Nav::Coding {
             let mut jump = false;
+            #[allow(deprecated)]
             egui::Area::new(egui::Id::new("jump-latest"))
                 .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -72.0])
                 .show(ctx, |ui| {
@@ -1141,12 +1142,13 @@ impl App {
         self.toasts.retain(|t| t.at.elapsed() < TOAST_TTL);
         if !self.toasts.is_empty() {
             let items = self.toasts.clone();
+            #[allow(deprecated)]
             egui::Area::new(egui::Id::new("toasts"))
                 .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -56.0])
                 .show(ctx, |ui| {
                     for t in items {
-                        egui::Frame::none().fill(SURFACE).rounding(RADIUS)
-                            .inner_margin(egui::Margin::symmetric(12.0, 8.0)).show(ui, |ui| {
+                        egui::Frame::default().fill(SURFACE).corner_radius(RADIUS)
+                            .inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.colored_label(if t.good { OK } else { WARN }, "●");
                                     ui.label(egui::RichText::new(t.text).size(12.0).color(TEXT));
@@ -1212,7 +1214,7 @@ fn render_rich(ui: &mut egui::Ui, text: &str, dim: bool) {
             },
             None => (String::new(), body.to_string()),
         };
-        egui::Frame::none().fill(SURFACE).rounding(RADIUS).inner_margin(8.0).show(ui, |ui| {
+        egui::Frame::default().fill(SURFACE).corner_radius(RADIUS).inner_margin(8.0).show(ui, |ui| {
             if !lang.is_empty() {
                 ui.label(egui::RichText::new(&lang).monospace().size(10.0).color(TEXT2));
             }
@@ -1221,7 +1223,7 @@ fn render_rich(ui: &mut egui::Ui, text: &str, dim: bool) {
             });
             let copy = code.clone();
             if ui.small_button("copy").clicked() {
-                ui.output_mut(|o| o.copied_text = copy);
+                ui.ctx().copy_text(copy);
             }
         });
         rest = tail;
@@ -1412,7 +1414,7 @@ fn render_md(ui: &mut egui::Ui, text: &str, dim: bool) {
                 }
             }
         }
-        ui.add(egui::Label::new(job).wrap(true));
+        ui.add(egui::Label::new(job).wrap());
     }
 }
 
@@ -1489,10 +1491,11 @@ impl App {
     /// this, because an `eframe::Frame` cannot be made without a window: a test
     /// can drive the three panes and every overlay through `egui::Context::run`
     /// and check what the layout actually produced rather than what it claims.
-    fn paint(&mut self, ctx: &egui::Context) {
+    fn paint(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         self.drain();
         if self.brand.is_none() {
-            self.brand = brand_texture(ctx);
+            self.brand = brand_texture(&ctx);
         }
         ctx.input_mut(|i| {
             if i.consume_key(MOD, egui::Key::K) {
@@ -1510,7 +1513,7 @@ impl App {
             }
         });
 
-        egui::TopBottomPanel::top("bar").show(ctx, |ui| {
+        egui::Panel::top("bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 brand_mark(ui, &self.brand, 14.0);
                 ui.label(egui::RichText::new("Fennec").strong().size(13.0));
@@ -1528,27 +1531,27 @@ impl App {
             });
         });
 
-        egui::SidePanel::left("left").resizable(true).default_width(252.0).min_width(210.0).max_width(340.0)
-            .show(ctx, |ui| {
+        egui::Panel::left("left").resizable(true).default_size(252.0).min_size(210.0).max_size(340.0)
+            .show(ui, |ui| {
                 self.left_rail(ui);
             });
         if self.right_open {
-            egui::SidePanel::right("right").resizable(true).default_width(326.0).min_width(260.0).max_width(430.0)
-                .show(ctx, |ui| {
+            egui::Panel::right("right").resizable(true).default_size(326.0).min_size(260.0).max_size(430.0)
+                .show(ui, |ui| {
                     self.right_panel(ui);
                 });
         }
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.center(ui);
         });
-        self.overlays(ctx);
+        self.overlays(&ctx);
         ctx.request_repaint_after(Duration::from_millis(150));
     }
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.paint(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.paint(ui);
     }
 }
 
@@ -1593,7 +1596,7 @@ fn main() -> Result<(), eframe::Error> {
         let mut app = App::new();
         app.mono_font = mono;
         app.ui_font = prop;
-        Box::new(app)
+        Ok(Box::new(app))
     }))
 }
 
@@ -1602,7 +1605,7 @@ fn main() -> Result<(), eframe::Error> {
 /// so a test paints what the user would see instead of egui's defaults.
 fn apply_theme(ctx: &egui::Context) -> (bool, bool) {
     let (mono, prop) = fonts::install(ctx);
-    ctx.style_mut(|s| {
+    ctx.style_mut_of(egui::Theme::Dark, |s| {
         s.visuals.dark_mode = true;
         s.visuals.panel_fill = BG;
         s.visuals.window_fill = PANEL;
@@ -1617,17 +1620,17 @@ fn apply_theme(ctx: &egui::Context) -> (bool, bool) {
         s.visuals.selection.stroke = egui::Stroke { width: 1.0, color: BRAND };
         s.visuals.hyperlink_color = BRAND;
         s.visuals.window_stroke = egui::Stroke { width: 1.0, color: BORDER };
-        s.visuals.popup_shadow.blur = 10.0;
+        s.visuals.popup_shadow.blur = 10;
         s.visuals.popup_shadow.color = egui::Color32::from_black_alpha(140);
         // Buttons, fields and windows take the same two corner steps as the
         // frames above, so nothing in the app is squared off next to a card.
-        let card = egui::Rounding::same(RADIUS);
-        let raised = egui::Rounding::same(RADIUS_RAISED);
+        let card = egui::CornerRadius::same(RADIUS as u8);
+        let raised = egui::CornerRadius::same(RADIUS_RAISED as u8);
         for w in [&mut s.visuals.widgets.noninteractive, &mut s.visuals.widgets.inactive,
                   &mut s.visuals.widgets.hovered, &mut s.visuals.widgets.active] {
-            w.rounding = card;
+            w.corner_radius = card;
         }
-        s.visuals.window_rounding = raised;
+        s.visuals.window_corner_radius = raised;
     });
     (mono, prop)
 }
@@ -1742,7 +1745,7 @@ mod tests {
         assert_eq!(info_string("let x = 1;"), None);
     }
 
-    /// Paint one frame with no window: `egui::Context::run` needs no
+    /// Paint one frame with no window: `egui::Context::run_ui` needs no
     /// `eframe::Frame`, and `tessellate` is the same triangle generation the
     /// GL painter calls. Returns the vertex count and the rectangle those
     /// triangles cover, so a pane that collapsed to nothing fails here instead
@@ -1752,7 +1755,8 @@ mod tests {
         apply_theme(&ctx);
         let mut input = egui::RawInput::default();
         input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
-        let out = ctx.run(input, |ctx| app.paint(ctx));
+        let mut out = ctx.run_ui(input, |ui| app.paint(ui));
+        out.textures_delta.clear();
         let mut covered = egui::Rect::NOTHING;
         let mut vertices = 0;
         for prim in ctx.tessellate(out.shapes, out.pixels_per_point) {
@@ -1917,7 +1921,6 @@ mod tests {
         let mut input = egui::RawInput::default();
         input.screen_rect =
             Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1500.0, 960.0)));
-        input.modifiers = modifiers;
         input.events = vec![egui::Event::Key {
             key,
             physical_key: None,
@@ -1925,7 +1928,8 @@ mod tests {
             repeat: false,
             modifiers,
         }];
-        let _ = ctx.run(input, |ctx| app.paint(ctx));
+        let mut out = ctx.run_ui(input, |ui| app.paint(ui));
+        out.textures_delta.clear();
     }
 
     #[test]

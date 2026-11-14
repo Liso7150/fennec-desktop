@@ -15,7 +15,7 @@ name = "fennec_desktop"
 path = "src/lib.rs"
 
 [dependencies]
-eframe = "0.27"
+eframe = "0.37"
 image = { version = "0.24", default-features = false, features = ["png"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 fennec-client = { path = "../fennec-core/src/fennec-client" }
