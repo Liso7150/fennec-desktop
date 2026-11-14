@@ -17,10 +17,18 @@ jobs:
         include:
           - os: windows-latest
             exe: fennec-desktop.exe
+            rust: stable
           - os: macos-latest
             exe: fennec-desktop
+            # eframe 0.27 reaches objc2 0.4.1 through winit 0.29 / icrate 0.0.4,
+            # and rustc 1.100 rejects the Ivar iterator forwarding there
+            # (E0277). 0.4.1 is the last release of that minor, so no
+            # semver-compatible update escapes it: this leg stays on the newest
+            # compiler that builds it until eframe is upgraded off winit 0.29.
+            rust: "1.99.0"
           - os: ubuntu-latest
             exe: fennec-desktop
+            rust: stable
     runs-on: ${{ matrix.os }}
     steps:
       # The app consumes fennec-client and fennec-economy by path, so the
@@ -33,6 +41,8 @@ jobs:
           repository: Liso7150/fennec-core
           path: fennec-core
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
       - name: Install windowing deps
         if: matrix.os == 'ubuntu-latest'
         run: |
