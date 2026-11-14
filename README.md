@@ -1,4 +1,4 @@
-![Fennec Desktop 2.5.0 — a local-first coding agent as a native Rust app (egui), talking to the local Fennec inference engine. Nothing is hosted. No Electron, no Node, no web view. Windows macOS Linux, MIT license.](docs/hero.png)
+![Fennec Desktop 1.0.0 — a local-first coding agent as a native Rust app (egui), talking to the local Fennec inference engine. Nothing is hosted. No Electron, no Node, no web view. Windows macOS Linux, MIT license.](docs/hero.png)
 
 Fennec is a native Rust desktop app (egui/eframe) for the suite. The model, the agent loop,
 the tools and the workspace discovery all run on this device; nothing is hosted, no account,
@@ -14,7 +14,7 @@ source is preserved on the `legacy-electron` branch; the tracked source is Rust 
 
 | UI | Backend | Compaction | Tests | Platforms |
 |---|---|---|---|---|
-| native window, egui/eframe | agent server `127.0.0.1:8787`, engine SSE `127.0.0.1:8184` | `fennec-economy`, in-process | 10 | Windows, macOS, Linux |
+| native window, egui/eframe | agent server `127.0.0.1:8787`, engine SSE `127.0.0.1:8184` | `fennec-economy`, in-process | 19 | Windows, macOS, Linux |
 
 ## Architecture
 
@@ -37,12 +37,17 @@ selector shows is what `fennec update` keeps current.
 |---|---|
 | Left rail | Fennec brand, real repository selector (manifest `repos[]` that exist on disk), Coding / My Attention / New Task / Search, recent sessions from the agent server, repo · branch · changed footer |
 | Center | Task header, structured timeline: streamed reasoning and answers, one card per tool call (category, title, Running / Complete / Warning / Failed, duration, arguments, expandable result), copyable code blocks, persistent composer, the loop's three jail switches (edits / commands / web) |
-| Right | Environment (core, engine, model, context window, tokens/s, outlets — live values), Subagents, Artifacts (files the run actually wrote), Research, context compaction |
+| Right | Environment (core, engine, model, vision, context window, tokens/s, outlets — live values), Subagents, Artifacts (files the run actually wrote), Research, context compaction |
 
 > [!NOTE]
 > Panels report what the backend actually exposes. With only the engine running the app is in
 > direct chat mode, so the tool timeline is empty and says so; features with no backend
-> registry are shown as unavailable instead of being faked.
+> registry are shown as unavailable instead of being faked — the composer's image, record and
+> read-aloud buttons stay disabled, each tooltip naming the reason. For images the reason comes
+> from the engine: `/health` answers with either a `vision` flag or an `input_modalities` list
+> (the Fennec engine declares `vision: false`; a Colibri server lists `image`), and an engine
+> that never answered is reported as this shell having no attachment path, because that is the
+> blocker either way. The Environment pane mirrors the same three states in its Vision row.
 
 ## Build and run
 
@@ -51,12 +56,17 @@ The app path-depends on the sibling `fennec-core` checkout, so fetch the repos t
 
 ```bash
 cargo build --release --offline        # ./target/release/fennec-desktop(.exe)
-cargo test  --release --offline        # 10 tests
+cargo test  --release --offline        # 21 tests
 ```
 
 The engine and the agent server start independently of the app; the Environment panel offers
 `Start agent loop` when the server is not reachable. CI checks out `fennec-core` beside this
 repo and runs the same two commands.
+
+The layout is tested without a window. One test paints the whole interface through
+`egui::Context::run` and measures the triangles the painter would have received, at the
+default and the minimum window size, so a pane that collapses fails the suite instead of only
+looking wrong on somebody's screen.
 
 ## Which engine answers
 
