@@ -1029,7 +1029,7 @@ impl App {
             }
         });
         let last = out.content_size.y - out.inner_rect.height();
-        self.timeline_off_end = out.state.offset().y < last - 24.0;
+        self.timeline_off_end = out.state.clamped_offset().y < last - 24.0;
     }
 
     fn overlays(&mut self, ctx: &egui::Context) {
