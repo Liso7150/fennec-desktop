@@ -14,7 +14,7 @@ source is preserved on the `legacy-electron` branch; the tracked source is Rust 
 
 | UI | Backend | Compaction | Tests | Platforms |
 |---|---|---|---|---|
-| native window, egui/eframe | agent server `127.0.0.1:8787`, engine SSE `127.0.0.1:8184` | `fennec-economy`, in-process | 15 | Windows, macOS, Linux |
+| native window, egui/eframe | agent server `127.0.0.1:8787`, engine SSE `127.0.0.1:8184` | `fennec-economy`, in-process | 33 | Windows, macOS, Linux |
 
 ## Architecture
 
@@ -56,7 +56,7 @@ The app path-depends on the sibling `fennec-core` checkout, so fetch the repos t
 
 ```bash
 cargo build --release --offline        # ./target/release/fennec-desktop(.exe)
-cargo test  --release --offline        # 15 tests
+cargo test  --release --offline        # 33 tests
 ```
 
 The engine and the agent server start independently of the app; the Environment panel offers
