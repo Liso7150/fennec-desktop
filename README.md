@@ -10,6 +10,10 @@ three-pane window.
 The app was rewritten from Electron/React/TypeScript to native Rust. The previous JS/TS
 source is preserved on the `legacy-electron` branch; the tracked source is Rust only.
 
+Nothing published on GitHub is this app: the releases stop at `v0.9.0`, and every asset
+there is an Electron installer — the `0.9.0` note calls it the last Electron build. The
+Rust binary is built from this tree with `cargo build --release --offline`.
+
 ## At a glance
 
 | UI | Backend | Compaction | Tests | Platforms |
