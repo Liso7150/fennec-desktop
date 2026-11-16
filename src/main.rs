@@ -51,6 +51,11 @@ const MOD_HINT: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
 /// How long a toast stays up. It is a notice, not a log line.
 const TOAST_TTL: Duration = Duration::from_secs(6);
 
+/// How long a prompt may wait for a cold engine. The service gives the warm-up
+/// 240 s; waiting past that would re-send a prompt long after the user gave up
+/// on it.
+const WARM_WINDOW: Duration = Duration::from_secs(300);
+
 /// Why each composer affordance is disabled. Each statement was checked
 /// against the backend it describes, so the tooltip is a fact, not a hedge.
 const VISION_REFUSED: &str =
@@ -166,6 +171,9 @@ struct App {
     seen_at: HashMap<String, String>,
     selected: String,
     timelines: HashMap<String, Timeline>,
+    /// Sessions whose steps this window has already asked the service for, so
+    /// a task selected after a restart is fetched once rather than every frame.
+    replayed: HashSet<String>,
     composer: String,
     allow_write: bool,
     allow_shell: bool,
@@ -185,6 +193,10 @@ struct App {
     jump_latest: bool,
     timeline_off_end: bool,
     line: String,
+    /// A prompt held back while a cold engine warms up, with the moment it was
+    /// queued. `/api/agent/start` answers 503 until the engine is listening, so
+    /// the prompt waits here instead of being thrown away.
+    pending_send: Option<(String, std::time::Instant)>,
     chat_cancel: Option<Arc<AtomicBool>>,
     rx: Receiver<UiEvent>,
     tx: Sender<UiEvent>,
@@ -272,11 +284,12 @@ impl App {
         Self {
             suite: s, workspaces, ws: 0, core, engine, env: Env::default(),
             tasks: Vec::new(), seen_at: HashMap::new(), selected: String::new(),
-            timelines: HashMap::new(), composer: String::new(),
+            timelines: HashMap::new(), replayed: HashSet::new(), composer: String::new(),
             allow_write: false, allow_shell: false, allow_web: false, ask_each: false,
             nav: Nav::Coding, right_open: true, search_open: false, search: String::new(),
             expanded: HashSet::new(), preview: None, diff: None, toasts: Vec::new(),
             jump_latest: false, timeline_off_end: false, line: String::new(),
+            pending_send: None,
             chat_cancel: None, rx, tx, mono_font: false, ui_font: false, brand: None, busy: false,
         }
     }
@@ -294,6 +307,84 @@ impl App {
 
     fn tl(&mut self, id: &str) -> &mut Timeline {
         self.timelines.entry(id.to_string()).or_default()
+    }
+
+    /// Follow one supervised run: pull the steps the loop kept, push them into
+    /// the timeline, and stop when the run is no longer running. This serves a
+    /// task started here and a task the service already knew about, which is
+    /// why restarting the app does not lose a finished run's history.
+    fn follow(&self, id: String) {
+        let (core, tx) = (self.core.clone(), self.tx.clone());
+        std::thread::spawn(move || {
+            let mut after = 0usize;
+            loop {
+                match core.poll(&id, after) {
+                    Ok(v) => {
+                        let steps: Vec<Value> = v["steps"].as_array().cloned().unwrap_or_default();
+                        if !steps.is_empty() {
+                            after += steps.len();
+                        }
+                        for s in &steps {
+                            for e in events::map_step(s) {
+                                let _ = tx.send(UiEvent::Task(id.clone(), e));
+                            }
+                        }
+                        let finished = v["status"].as_str().map(|s| s != "running").unwrap_or(true);
+                        // `pending` is the questions this run still holds. A
+                        // service that does not report the list is not the same
+                        // as an empty one — except once the run is over, when it
+                        // cannot be waiting on anyone.
+                        let live = match (v["pending"].as_array(), finished) {
+                            (Some(list), _) => Some(list.iter().filter_map(Value::as_str)
+                                .map(str::to_string).collect::<Vec<String>>()),
+                            (None, true) => Some(Vec::new()),
+                            (None, false) => None,
+                        };
+                        if let Some(ids) = live {
+                            let _ = tx.send(UiEvent::Pending(id.clone(), ids));
+                        }
+                        if finished {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(UiEvent::Line(format!("Polling stopped: {e}")));
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        });
+    }
+
+    /// The rail lists sessions from the service, but a timeline is built from
+    /// the events this window watched. So a task selected after a restart — or
+    /// started in another shell — opens empty unless its steps are fetched.
+    /// Once per session per run: an empty timeline is also what a run that has
+    /// not produced a step yet looks like, and only the service can say what
+    /// that run actually did.
+    fn replay_history(&mut self) {
+        let id = self.selected.clone();
+        if id.is_empty() || id.starts_with("draft-") || self.replayed.contains(&id) {
+            return;
+        }
+        self.replayed.insert(id.clone());
+        if self.timelines.get(&id).map(|t| !t.messages.is_empty()).unwrap_or(false) {
+            return;
+        }
+        let goal = self.tasks.iter().find(|t| t.id == id)
+            .map(|t| t.goal.clone()).unwrap_or_default();
+        if !goal.is_empty() {
+            // The prompt itself is not one of the loop's steps; the row that
+            // started the run put it at the top. Its time is the service's, not
+            // this window's, so no stamp is invented for it.
+            self.tl(&id).messages.push(ChatMessage { role: Role::User, text: goal, time: String::new() });
+        }
+        // A unit test must not depend on whatever is listening on the machine,
+        // so only a built binary asks for the steps. The fetch itself was
+        // checked through the real window.
+        #[cfg(not(test))]
+        self.follow(id);
     }
 
     fn drain(&mut self) {
@@ -350,7 +441,10 @@ impl App {
                     let tl = self.timelines.entry(id).or_default();
                     tl.answer_approval(&approval_id, &decision, error);
                 }
-                UiEvent::Env(e) => self.env = e,
+                UiEvent::Env(e) => {
+                    self.env = e;
+                    self.flush_warm_queue();
+                }
                 UiEvent::Sessions(list) => {
                     for t in list {
                         let entry = self.seen_at.entry(t.id.clone()).or_insert_with(events::now_stamp).clone();
@@ -413,16 +507,71 @@ impl App {
         id
     }
 
+    /// The whole life of a prompt queued behind a cold engine: send it when both
+    /// backends answer, give it back the moment the service stops answering, keep
+    /// waiting inside the window, and hand it back to the composer when the window
+    /// closes — a dropped prompt is worse than a late one.
+    fn flush_warm_queue(&mut self) {
+        let Some((text, queued)) = self.pending_send.take() else { return };
+        if self.env.core_up && self.env.engine_up {
+            self.send_text(text);
+        } else if !self.env.core_up {
+            self.composer = text;
+            self.line = "The agent loop stopped answering. The queued prompt is back in the composer."
+                .to_string();
+        } else if queued.elapsed() < WARM_WINDOW {
+            self.pending_send = Some((text, queued));
+        } else {
+            self.composer = text;
+            self.line = "The engine did not answer within the warm-up window. \
+                The queued prompt is back in the composer."
+                .to_string();
+        }
+    }
+
     /// Sending has exactly two real paths, chosen by which backend answers:
     /// the agent loop (tool events, jail switches) or the engine's chat stream.
     /// With neither reachable the prompt stays on screen and the app says so.
     fn send(&mut self) {
         let text = std::mem::take(&mut self.composer);
+        self.send_text(text);
+    }
+
+    /// The send path on its own, so a prompt queued behind a cold engine can be
+    /// re-sent without putting it back in the composer first.
+    fn send_text(&mut self, text: String) {
         if text.trim().is_empty() {
             return;
         }
         self.line.clear();
         if self.env.core_up {
+            if !self.env.engine_up {
+                // `/api/agent/start` answers 503 while the engine is down, so the
+                // prompt is queued and the service is asked to warm the engine.
+                // The status poll re-sends it once the model answers; warming
+                // takes minutes, so nothing here may block the UI thread.
+                if self.pending_send.is_some() {
+                    // One prompt per warm-up. There is a single composer, and
+                    // overwriting what it holds would drop the user's earlier
+                    // words without ever showing them where they went.
+                    self.composer = text;
+                    self.line = "The engine is still warming and it already holds a prompt. \
+                        This one stays in the composer until that one sends."
+                        .to_string();
+                    return;
+                }
+                self.pending_send = Some((text, std::time::Instant::now()));
+                self.line = "Engine is offline - starting it. This prompt sends itself once the model answers.".to_string();
+                if let Err(e) = self.core.engine_start() {
+                    // A failed ask is not evidence that nothing is warming. Measured
+                    // on the live service, this POST hit its client timeout and the
+                    // engine came up anyway, so the prompt stays queued and the
+                    // status poll - which is what actually knows - decides.
+                    self.line = format!("Asked the agent loop to start the engine, and it did not \
+                        confirm ({e}). The prompt stays queued until the model answers.");
+                }
+                return;
+            }
             let workspace = self.workspace();
             match self.core.start(&text, &workspace, self.allow_write, self.allow_shell,
                                   self.allow_web, self.ask_each) {
@@ -438,51 +587,14 @@ impl App {
                     self.selected = id.clone();
                     self.seen_at.insert(id.clone(), events::now_stamp());
                     self.busy = true;
-                    let core = self.core.clone();
-                    let tx = self.tx.clone();
-                    std::thread::spawn(move || {
-                        let mut after = 0usize;
-                        loop {
-                            match core.poll(&id, after) {
-                                Ok(v) => {
-                                    let steps: Vec<Value> = v["steps"].as_array().cloned().unwrap_or_default();
-                                    if !steps.is_empty() {
-                                        after += steps.len();
-                                    }
-                                    for s in &steps {
-                                        for e in events::map_step(s) {
-                                            let _ = tx.send(UiEvent::Task(id.clone(), e));
-                                        }
-                                    }
-                                    let finished = v["status"].as_str().map(|s| s != "running").unwrap_or(true);
-                                    // `pending` is the questions this run still
-                                    // holds. A service that does not report the
-                                    // list is not the same as an empty one —
-                                    // except once the run is over, when it
-                                    // cannot be waiting on anyone.
-                                    let live = match (v["pending"].as_array(), finished) {
-                                        (Some(list), _) => Some(list.iter().filter_map(Value::as_str)
-                                            .map(str::to_string).collect::<Vec<String>>()),
-                                        (None, true) => Some(Vec::new()),
-                                        (None, false) => None,
-                                    };
-                                    if let Some(ids) = live {
-                                        let _ = tx.send(UiEvent::Pending(id.clone(), ids));
-                                    }
-                                    if finished {
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(UiEvent::Line(format!("Polling stopped: {e}")));
-                                    break;
-                                }
-                            }
-                            std::thread::sleep(Duration::from_millis(300));
-                        }
-                    });
+                    self.follow(id.clone());
                 }
-                Err(e) => self.line = format!("Agent server refused the task: {e}"),
+                Err(e) => {
+                    // The prompt goes back to the composer rather than being
+                    // discarded with the failure.
+                    self.composer = text;
+                    self.line = format!("Agent server refused the task: {e}");
+                }
             }
             return;
         }
@@ -844,7 +956,15 @@ impl App {
                             ui.label(egui::RichText::new(&model).monospace().size(11.0).color(TEXT2));
                         }
                         let enabled = !self.composer.trim().is_empty();
-                        if ui.add_enabled(enabled, egui::Button::new(egui::RichText::new("Send  ↑").color(egui::Color32::from_rgb(34, 18, 13))).fill(BRAND)).clicked() {
+                        // The glyph is a send arrow, not a key: the shortcut is
+                        // spelled out, and a cold engine says so before the click.
+                        let hint = if core_up && !engine_up {
+                            format!("{MOD_HINT}+Enter sends. The engine is offline, so the first send starts it and the prompt waits for the model to answer.")
+                        } else {
+                            format!("{MOD_HINT}+Enter sends")
+                        };
+                        if ui.add_enabled(enabled, egui::Button::new(egui::RichText::new("Send  ↑").color(egui::Color32::from_rgb(34, 18, 13))).fill(BRAND))
+                            .on_hover_text(hint).clicked() {
                             send_now = true;
                         }
                     });
@@ -1494,6 +1614,9 @@ impl App {
     fn paint(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.drain();
+        // The steps a run left behind live in the service, not in this window,
+        // so a task selected after a restart is fetched before it is painted.
+        self.replay_history();
         if self.brand.is_none() {
             self.brand = brand_texture(&ctx);
         }
@@ -1955,5 +2078,102 @@ mod tests {
         });
         press_key(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
         assert!(!app.search_open && app.preview.is_none(), "Escape dismisses what is open");
+    }
+
+    /// A service that cannot be reached must not swallow the prompt: the whole
+    /// point of the warm-up queue is that a send either runs, waits, or comes
+    /// back to the composer. Port 1 has no listener, so the call fails fast and
+    /// stays inside loopback.
+    #[test]
+    fn a_send_that_cannot_reach_the_service_waits_then_comes_back() {
+        let mut app = App::new();
+        app.core.base = "http://127.0.0.1:1".into();
+        app.env.core_up = true;
+        app.env.engine_up = false;
+        app.composer = "explain the build".into();
+        app.send();
+        // Measured on the live service: this ask hit its client timeout while the
+        // engine started anyway, so throwing the prompt away on a timeout lost a
+        // run that was already warming.
+        assert_eq!(app.pending_send.as_ref().map(|(t, _)| t.clone()).unwrap_or_default(),
+            "explain the build", "an unconfirmed ask leaves the prompt queued");
+        assert!(app.tasks.is_empty(), "no task is invented for a prompt that never reached the loop");
+
+        // The next status poll is what actually knows the service went away.
+        app.env.core_up = false;
+        app.flush_warm_queue();
+        assert_eq!(app.composer, "explain the build", "the prompt comes back instead of vanishing");
+        assert!(app.pending_send.is_none(), "and the queue is empty once it does");
+    }
+
+    /// The warm-up holds one prompt, so a second send while the model is loading
+    /// has to stay where the user can still see it rather than quietly replace
+    /// what the queue is waiting to deliver.
+    #[test]
+    fn a_second_send_while_the_engine_warms_is_not_swallowed() {
+        let mut app = App::new();
+        app.core.base = "http://127.0.0.1:1".into();
+        app.env.core_up = true;
+        app.env.engine_up = false;
+        app.composer = "first".into();
+        app.send();
+        let held = app.pending_send.as_ref().map(|(_, at)| *at);
+        app.composer = "second".into();
+        app.send();
+        assert_eq!(app.pending_send.as_ref().map(|(t, _)| t.clone()).unwrap_or_default(),
+            "first", "the held prompt is not replaced");
+        assert_eq!(app.pending_send.as_ref().map(|(_, at)| *at), held, "nor is its window restarted");
+        assert_eq!(app.composer, "second", "the second send stays on screen");
+        assert!(app.line.contains("already holds a prompt"), "{}", app.line);
+    }
+
+    /// The steps a run left behind live in the service, so a task this window
+    /// did not watch has to be fetched when it is selected — once, with its
+    /// prompt at the top and no timestamp invented for it.
+    #[test]
+    fn a_task_this_window_never_watched_is_fetched_once() {
+        let mut app = App::new();
+        app.tasks.push(Task { id: "s9".into(), title: "fix the flake".into(),
+            status: TaskStatus::Complete, updated: String::new(),
+            goal: "fix the flake".into(), draft: false });
+        app.selected = "s9".into();
+        app.replay_history();
+        let tl = app.timelines.get("s9").expect("selecting a task opens its timeline");
+        assert_eq!(tl.messages.len(), 1, "the prompt heads the replay");
+        assert!(tl.messages[0].time.is_empty(), "no stamp is invented for a run this window did not watch");
+        app.replay_history();
+        assert_eq!(app.timelines["s9"].messages.len(), 1, "and the service is asked once per session");
+
+        // A draft is local chat: there is no supervised run to fetch.
+        app.selected = "draft-1".into();
+        app.replay_history();
+        assert!(!app.timelines.contains_key("draft-1"), "a draft has no service history");
+    }
+
+    #[test]
+    fn the_warm_queue_sends_keeps_or_returns_the_prompt() {
+        let mut app = App::new();
+        app.core.base = "http://127.0.0.1:1".into();
+        app.env.core_up = true;
+        app.env.engine_up = false;
+
+        // Past the window the prompt is returned, not sent into a dead service.
+        let then = std::time::Instant::now().checked_sub(WARM_WINDOW * 2).expect("a monotonic clock");
+        app.pending_send = Some(("late prompt".into(), then));
+        app.flush_warm_queue();
+        assert_eq!(app.composer, "late prompt");
+        assert!(app.line.contains("warm-up window"), "{}", app.line);
+
+        // Inside the window it stays queued for the next status poll.
+        app.composer.clear();
+        app.pending_send = Some(("quick one".into(), std::time::Instant::now()));
+        app.flush_warm_queue();
+        assert_eq!(app.pending_send.as_ref().map(|(t, _)| t.clone()).unwrap_or_default(), "quick one");
+
+        // Once both backends answer the queue empties, and the prompt is the
+        // service's problem rather than the queue's.
+        app.env.engine_up = true;
+        app.flush_warm_queue();
+        assert!(app.pending_send.is_none(), "a queued prompt is handed over exactly once");
     }
 }

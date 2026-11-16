@@ -60,7 +60,7 @@ The app path-depends on the sibling `fennec-core` checkout, so fetch the repos t
 
 ```bash
 cargo build --release --offline        # ./target/release/fennec-desktop(.exe)
-cargo test  --release --offline        # 33 tests
+cargo test  --release --offline        # 37 tests
 ```
 
 The engine and the agent server start independently of the app; the Environment panel offers
