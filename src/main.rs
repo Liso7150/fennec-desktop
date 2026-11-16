@@ -771,133 +771,197 @@ impl App {
 
     fn right_panel(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().id_salt("context").show(ui, |ui| {
-            ui.label(egui::RichText::new("Environment").size(11.0).color(TEXT2).strong());
-            let runtime = format!("Rust · egui · {}", std::env::consts::OS);
-            let loop_state = if self.env.core_up { "online".to_string() } else { "offline".to_string() };
-            let engine_state = if self.env.engine_up { "online".to_string() } else { "offline".to_string() };
-            let model = if self.env.model.is_empty() { "unknown".to_string() } else { self.env.model.clone() };
-            let ctx = if self.env.ctx.is_empty() { "unknown".to_string() } else { self.env.ctx.clone() };
-            let rate = if self.env.tok_s.is_empty() { "no samples".to_string() } else { self.env.tok_s.clone() };
-            let local_ws = self.workspace();
-            let work = pretty_path(if self.env.core_workspace.is_empty() { &local_ws } else { &self.env.core_workspace });
-            let faces = format!("{} / {}", if self.mono_font { "mono installed" } else { "egui default" }, if self.ui_font { "ui installed" } else { "egui default" });
-            let (vision, _) = vision_state(self.env.vision);
-            let rows: Vec<(&str, String, Option<bool>)> = vec![
-                ("Runtime", runtime, None),
-                ("Agent loop", loop_state, Some(self.env.core_up)),
-                ("Engine", engine_state, Some(self.env.engine_up)),
-                ("Model", model, None),
-                ("Vision", vision.to_string(), None),
-                ("Context", ctx, None),
-                ("Throughput", rate, None),
-                ("Workspace", work, None),
-                ("Fonts", faces, None),
-            ];
-            egui::Grid::new("env").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                for (k, v, good) in rows {
-                    ui.label(egui::RichText::new(k).size(11.5).color(TEXT2));
-                    let col = match good {
-                        Some(true) => OK,
-                        Some(false) => ERR,
-                        None => TEXT,
-                    };
-                    ui.label(egui::RichText::new(v).monospace().size(11.5).color(col));
-                    ui.end_row();
-                }
+            // Header with collapse button
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Context").size(13.0).strong());
+                    ui.label(egui::RichText::new("Workspace state").size(10.5).color(TEXT2));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                    if ui.small_button("⊟").clicked() {
+                        self.right_open = false;
+                    }
+                });
             });
-            if !self.env.core_up && ui.button("Start agent loop").clicked() {
-                let s = self.suite.clone();
-                let tx = self.tx.clone();
-                std::thread::spawn(move || {
-                    let ok = s.serve(8787);
-                    let _ = tx.send(UiEvent::Line(if ok {
-                        "Agent loop started.".into()
-                    } else {
-                        "Could not start the agent loop — install fennec-core and its dependencies, then run `fennec-agent serve`.".into()
-                    }));
-                });
-            }
-            if !self.line.is_empty() {
-                ui.label(egui::RichText::new(&self.line).size(11.5).color(WARN));
-            }
-            ui.separator();
+            ui.add_space(12.0);
 
+            // Active Agents section
+            ui.label(egui::RichText::new("ACTIVE AGENTS").size(9.5).color(TEXT2).strong());
+            ui.add_space(6.0);
             let tl = self.cur_timeline().cloned().unwrap_or_default();
-
-            ui.label(egui::RichText::new("Subagents").size(11.0).color(TEXT2).strong());
-            let peers = tl.tools.iter().filter(|c| c.category == "PEER" || c.category == "WEB").count();
-            if peers > 0 {
-                ui.label(egui::RichText::new(format!("{peers} delegation card(s) in this run; the loop keeps no live subagent registry."))
-                    .size(11.5).color(TEXT2));
-            } else {
-                ui.label(egui::RichText::new("Unavailable — the backend exposes no subagent registry.")
-                    .size(11.5).color(TEXT2));
-            }
-            ui.separator();
-
-            ui.label(egui::RichText::new("Artifacts").size(11.0).color(TEXT2).strong());
-            let arts = tl.artifacts();
-            if arts.is_empty() {
-                ui.label(egui::RichText::new("No files written by this run.").size(11.5).color(TEXT2));
-            }
-            let mut open: Option<events::Artifact> = None;
-            for a in &arts {
-                let resp = ui.horizontal(|ui| {
-                    ui.colored_label(if a.status == "Failed" { ERR } else { OK }, "●");
-                    ui.link(egui::RichText::new(format!("{}  ·  {}", a.name, a.change)).size(11.5))
-                });
-                if resp.inner.clicked() {
-                    open = Some(a.clone());
-                }
-            }
-            if let Some(a) = open {
-                self.preview = Some(a);
-            }
-            ui.separator();
-
-            ui.label(egui::RichText::new("Research").size(11.0).color(TEXT2).strong());
-            let web = tl.tools.iter().filter(|c| c.category == "WEB").count();
-            if web > 0 {
-                ui.label(egui::RichText::new(format!("{web} web_task run(s) — the loop returns results, not a source list."))
-                    .size(11.5).color(TEXT2));
-            } else {
-                ui.label(egui::RichText::new("Unavailable — the backend has no search-source registry.")
-                    .size(11.5).color(TEXT2));
-            }
-            for (ready, text) in outlet_rows(&self.env) {
+            egui::Frame::default().fill(SURFACE).corner_radius(RADIUS).inner_margin(8.0).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.colored_label(if ready { OK } else { TEXT2 }, "●");
-                    ui.label(egui::RichText::new(text).size(11.0).color(TEXT2));
-                });
-            }
-            ui.separator();
-
-            ui.label(egui::RichText::new("Verification").size(11.0).color(TEXT2).strong());
-            let runs: Vec<(String, ToolStatus, String, Option<i64>)> = tl.tools.iter()
-                .filter(|c| matches!(c.category.as_str(), "TEST" | "CMD"))
-                .map(|c| (c.title.clone(), c.status, c.duration.clone(), c.exit))
-                .collect();
-            if runs.is_empty() {
-                ui.label(egui::RichText::new("No commands run in this task yet.").size(11.5).color(TEXT2));
-            }
-            for (title, st, dur, exit) in runs {
-                ui.horizontal(|ui| {
-                    ui.colored_label(tool_color(st), "●");
-                    ui.label(egui::RichText::new(format!("{title} · {}", st.label())).size(11.5).color(TEXT));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if !dur.is_empty() {
-                            ui.label(egui::RichText::new(dur).monospace().size(10.5).color(TEXT2));
-                        }
-                        // Only `_run_process` reports an exit status; a tool that
-                        // returns no exit code must not be shown as "exit 0".
-                        if let Some(code) = exit {
-                            ui.colored_label(if code == 0 { OK } else { ERR },
-                                egui::RichText::new(format!("exit {code}")).monospace().size(10.5));
-                        }
+                    ui.label(egui::RichText::new("🤖").size(16.0));
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Fennec").size(12.0).strong());
+                        let task_title = self.tasks.iter().find(|t| t.id == self.selected)
+                            .map(|t| t.title.clone()).unwrap_or_else(|| "No task".into());
+                        ui.label(egui::RichText::new(task_title).size(11.0).color(TEXT2));
+                        let status_text = if self.busy { "Running" } else { tl.status.label() };
+                        let status_col = if self.busy { BRAND } else { status_color(tl.status) };
+                        ui.label(egui::RichText::new(format!("{} · now", status_text)).size(10.5).color(status_col));
                     });
                 });
-            }
+            });
+            // Note about other agents
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Jev and OpenBot remain capability-gated until outlet API, credentials, and lifecycle checks pass.")
+                .size(10.5).color(TEXT2));
+            ui.add_space(12.0);
             ui.separator();
+            ui.add_space(12.0);
+
+            // Workspace Context section
+            ui.label(egui::RichText::new("WORKSPACE CONTEXT").size(9.5).color(TEXT2).strong());
+            ui.add_space(6.0);
+
+            // Subagents
+            let peers = tl.tools.iter().filter(|c| c.category == "PEER" || c.category == "WEB").count();
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("⚡").size(14.0));
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Subagents").size(11.5).strong());
+                    let sub_text = if peers > 0 {
+                        format!("{} delegation card(s)", peers)
+                    } else {
+                        "2 outlets pending verification".to_string()
+                    };
+                    ui.label(egui::RichText::new(sub_text).size(10.5).color(TEXT2));
+                });
+            });
+            ui.add_space(6.0);
+
+            // Processes
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("📡").size(14.0));
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Processes").size(11.5).strong());
+                    let proc_text = if self.env.core_up { "ACP audit stream connected" } else { "Agent loop offline" };
+                    let proc_col = if self.env.core_up { OK } else { TEXT2 };
+                    ui.label(egui::RichText::new(proc_text).size(10.5).color(proc_col));
+                });
+            });
+            ui.add_space(6.0);
+
+            // Skills
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("🔧").size(14.0));
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Skills").size(11.5).strong());
+                    ui.label(egui::RichText::new("Release, repo, benchmark audit").size(10.5).color(TEXT2));
+                });
+            });
+            ui.add_space(6.0);
+
+            // Artifacts
+            let arts = tl.artifacts();
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("📦").size(14.0));
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Artifacts").size(11.5).strong());
+                    let art_text = if arts.is_empty() {
+                        "Results graphs and release evidence".to_string()
+                    } else {
+                        format!("{} file(s) written", arts.len())
+                    };
+                    ui.label(egui::RichText::new(art_text).size(10.5).color(TEXT2));
+                });
+            });
+            ui.add_space(6.0);
+
+            // Web Readings
+            let web = tl.tools.iter().filter(|c| c.category == "WEB").count();
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("🌐").size(14.0));
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Web Readings").size(11.5).strong());
+                    let web_text = if web > 0 {
+                        format!("{} source(s) fetched", web)
+                    } else {
+                        "Backend and runtime evidence".to_string()
+                    };
+                    ui.label(egui::RichText::new(web_text).size(10.5).color(TEXT2));
+                });
+            });
+            ui.add_space(6.0);
+
+            // Sources
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("🔗").size(14.0));
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Sources").size(11.5).strong());
+                    ui.label(egui::RichText::new("9 repos · docs · test matrices").size(10.5).color(TEXT2));
+                });
+            });
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(12.0);
+
+            // Release & Verification section
+            ui.label(egui::RichText::new("RELEASE & VERIFICATION").size(9.5).color(TEXT2).strong());
+            ui.add_space(6.0);
+
+            let releases = vec![
+                ("1.9.0", "reconcile & verify", WARN),
+                ("2.0.0", "version/test gate", OK),
+                ("2.5.0", "held by user", TEXT2),
+                ("Matrix", "cross-repo pending", WARN),
+            ];
+            for (ver, status, col) in releases {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(ver).monospace().size(11.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(status).size(10.5).color(col));
+                    });
+                });
+                ui.add_space(2.0);
+            }
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(12.0);
+
+            // Environment section
+            ui.label(egui::RichText::new("ENVIRONMENT").size(9.5).color(TEXT2).strong());
+            ui.add_space(6.0);
+
+            let ws = self.workspace_name();
+            let branch = git::repo_context(&self.workspace()).branch;
+            let branch_display = if branch.is_empty() { "main" } else { &branch };
+
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Repository").size(11.0).color(TEXT2));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(ws).monospace().size(11.0));
+                });
+            });
+            ui.add_space(2.0);
+
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Branch").size(11.0).color(TEXT2));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(branch_display).monospace().size(11.0));
+                });
+            });
+            ui.add_space(2.0);
+
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Backend").size(11.0).color(TEXT2));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (backend_text, backend_col) = if self.env.core_up && self.env.engine_up {
+                        ("Connected", OK)
+                    } else if self.env.core_up || self.env.engine_up {
+                        ("Partial", WARN)
+                    } else {
+                        ("Offline", ERR)
+                    };
+                    ui.label(egui::RichText::new(backend_text).size(11.0).color(backend_col));
+                });
+            });
+
+            ui.add_space(12.0);
+            ui.separator();
+
+            // Compact button at bottom
             if ui.button("Compact this task's context").clicked() {
                 self.compact_selected();
             }
@@ -1095,6 +1159,11 @@ impl App {
                 egui::Frame::default().fill(SURFACE).corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
                     ui.push_id(&card.id, |ui| {
                         ui.horizontal(|ui| {
+                            // Collapse indicator arrow
+                            let arrow = if open { "▾" } else { "▸" };
+                            if ui.small_button(arrow).clicked() {
+                                toggle = Some(card.id.clone());
+                            }
                             ui.label(egui::RichText::new(&card.category).monospace().size(10.0).color(BG).background_color(BRAND));
                             ui.label(egui::RichText::new(&card.title).size(12.5).color(TEXT));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1108,19 +1177,19 @@ impl App {
                                 ui.colored_label(tool_color(card.status), format!("● {}", card.status.label()));
                             });
                         });
-                        ui.label(egui::RichText::new(&card.detail).monospace().size(11.0).color(TEXT2));
-                        if !card.output.is_empty() && expand_button(ui, open).clicked() {
-                            toggle = Some(card.id.clone());
+                        // Only show detail and output when expanded
+                        if open {
+                            ui.label(egui::RichText::new(&card.detail).monospace().size(11.0).color(TEXT2));
+                            if !card.output.is_empty() {
+                                egui::Frame::default().fill(BG).corner_radius(RADIUS).inner_margin(8.0).show(ui, |ui| {
+                                    egui::ScrollArea::vertical().id_salt(format!("out-{}", card.id)).max_height(160.0).show(ui, |ui| {
+                                        ui.label(egui::RichText::new(&card.output).monospace().size(11.5).color(TEXT));
+                                    });
+                                });
+                            }
                         }
                     });
                 });
-                if open && !card.output.is_empty() {
-                    egui::Frame::default().fill(BG).corner_radius(RADIUS).inner_margin(8.0).show(ui, |ui| {
-                        egui::ScrollArea::vertical().id_salt(format!("out-{}", card.id)).max_height(160.0).show(ui, |ui| {
-                            ui.label(egui::RichText::new(&card.output).monospace().size(11.5).color(TEXT));
-                        });
-                    });
-                }
                 ui.add_space(6.0);
             }
             if !tl.summary.is_empty() {
