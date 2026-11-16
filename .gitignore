@@ -9,3 +9,11 @@ __pycache__/
 .pytest_cache/
 # The OpenVINO NPU plugin writes this next to the working directory on every compile.
 kernel.errors.txt
+
+# Auto-update artifacts
+*.old
+*.new
+*.exe.old
+*.bin.old
+fennec-desktop-*.exe
+fennec-desktop-*.bin

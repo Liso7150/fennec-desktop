@@ -1260,6 +1260,46 @@ impl App {
         // Toasts sit over the composer: they report something that happened in
         // a pane the user is not looking at, then expire without being cleared.
         self.toasts.retain(|t| t.at.elapsed() < TOAST_TTL);
+        
+        // Cap unbounded collections to prevent memory leaks in long-running sessions.
+        // Keep only the most recent 100 tasks, 50 timelines, and 200 seen_at entries.
+        const MAX_TASKS: usize = 100;
+        const MAX_TIMELINES: usize = 50;
+        const MAX_SEEN_AT: usize = 200;
+        
+        if self.tasks.len() > MAX_TASKS {
+            self.tasks.truncate(MAX_TASKS);
+        }
+        if self.timelines.len() > MAX_TIMELINES {
+            // Remove oldest timelines (first inserted)
+            let keys_to_remove: Vec<_> = self.timelines.keys()
+                .take(self.timelines.len() - MAX_TIMELINES)
+                .cloned()
+                .collect();
+            for key in keys_to_remove {
+                self.timelines.remove(&key);
+                self.seen_at.remove(&key);
+                self.replayed.remove(&key);
+            }
+        }
+        if self.seen_at.len() > MAX_SEEN_AT {
+            // Remove oldest seen_at entries
+            let mut entries: Vec<_> = self.seen_at.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            entries.sort_by(|a, b| a.1.cmp(&b.1));
+            let keys_to_remove: Vec<_> = entries.iter()
+                .take(self.seen_at.len() - MAX_SEEN_AT)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for key in keys_to_remove {
+                self.seen_at.remove(&key);
+            }
+        }
+        // Clear replayed set periodically to prevent unbounded growth
+        if self.replayed.len() > 1000 {
+            self.replayed.clear();
+        }
         if !self.toasts.is_empty() {
             let items = self.toasts.clone();
             #[allow(deprecated)]

@@ -8,3 +8,4 @@
 //! surface shares.
 pub mod events;
 pub mod fonts;
+pub mod updater;

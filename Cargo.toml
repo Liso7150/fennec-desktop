@@ -19,8 +19,13 @@ path = "src/lib.rs"
 eframe = "0.37"
 image = { version = "0.24", default-features = false, features = ["png"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+serde = { version = "1", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+sha2 = "0.10"
+hex = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 fennec-client = { path = "../fennec-core/src/fennec-client" }
-fennec-economy = { path = "../fennec-core/src/fennec-economy" }
+fennec-economy = { path = "../fennec-economy" }
 
 [profile.release]
 opt-level = 3
