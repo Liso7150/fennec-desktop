@@ -35,6 +35,10 @@ jobs:
         with:
           repository: Liso7150/fennec-core
           path: fennec-core
+      - uses: actions/checkout@v4
+        with:
+          repository: Liso7150/fennec-economy
+          path: fennec-economy
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ matrix.rust }}
