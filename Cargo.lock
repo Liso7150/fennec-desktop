@@ -1149,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "fennec-desktop"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "eframe",
  "fennec-client",

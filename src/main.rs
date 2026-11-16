@@ -17,6 +17,7 @@ use fennec_client::engine::{ChatDelta, Engine};
 use fennec_client::{git, suite, Core, Outlet};
 use fennec_desktop::events::{self, ChatMessage, Event, Role, Task, TaskStatus, Timeline, ToolStatus};
 use fennec_desktop::fonts;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -24,6 +25,39 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
+
+// ---- History persistence types ----
+
+#[derive(Serialize, Deserialize)]
+struct HistoryData {
+    tasks: Vec<HistoryTask>,
+    timelines: HashMap<String, HistoryTimeline>,
+    seen_at: HashMap<String, String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct HistoryTask {
+    id: String,
+    title: String,
+    status: String,
+    updated: String,
+    goal: String,
+    draft: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct HistoryTimeline {
+    messages: Vec<HistoryMessage>,
+    summary: String,
+    status: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct HistoryMessage {
+    role: String,
+    text: String,
+    time: String,
+}
 
 // Fennec Night: warm charcoal ground, terracotta primary, no blue anywhere.
 const BG: egui::Color32 = egui::Color32::from_rgb(21, 18, 15);
@@ -110,7 +144,6 @@ struct Env {
     core_up: bool,
     core_workspace: String,
     engine_up: bool,
-    engine_url: String,
     model: String,
     ctx: String,
     tok_s: String,
@@ -204,6 +237,19 @@ struct App {
     ui_font: bool,
     brand: Option<egui::TextureHandle>,
     busy: bool,
+    /// Task queue: prompts waiting for the AI to finish current task.
+    task_queue: Vec<QueuedTask>,
+    /// Collapsed state for thought/reasoning messages (keyed by timeline id + message index).
+    collapsed_thoughts: HashSet<String>,
+}
+
+/// A task waiting in the queue while AI works on another.
+#[derive(Clone)]
+#[allow(dead_code)]
+struct QueuedTask {
+    id: String,
+    text: String,
+    queued_at: std::time::Instant,
 }
 
 impl App {
@@ -225,7 +271,7 @@ impl App {
         // either way, just from events the test injects.
         #[cfg(not(test))]
         std::thread::spawn(move || loop {
-            let mut env = Env { engine_url: engine0.base.clone(), ..Default::default() };
+            let mut env = Env { ..Default::default() };
             if let Some(h) = core0.health() {
                 env.core_up = true;
                 env.core_workspace = h["workspace"].as_str().unwrap_or("").to_string();
@@ -281,7 +327,7 @@ impl App {
             let _ = tx2.send(UiEvent::Env(env));
             std::thread::sleep(Duration::from_millis(2000));
         });
-        Self {
+        let mut app = Self {
             suite: s, workspaces, ws: 0, core, engine, env: Env::default(),
             tasks: Vec::new(), seen_at: HashMap::new(), selected: String::new(),
             timelines: HashMap::new(), replayed: HashSet::new(), composer: String::new(),
@@ -291,7 +337,15 @@ impl App {
             jump_latest: false, timeline_off_end: false, line: String::new(),
             pending_send: None,
             chat_cancel: None, rx, tx, mono_font: false, ui_font: false, brand: None, busy: false,
+            task_queue: Vec::new(), collapsed_thoughts: HashSet::new(),
+        };
+        // Only load history in non-test builds to avoid test interference
+        #[cfg(not(test))]
+        app.load_history();
+        if app.selected.is_empty() {
+            app.selected = app.tasks.first().map(|t| t.id.clone()).unwrap_or_default();
         }
+        app
     }
 
     fn workspace(&self) -> String {
@@ -481,6 +535,8 @@ impl App {
                 }
             }
         }
+        // Process task queue when AI becomes idle
+        self.process_queue();
     }
 
     /// A toast expires on its own; only the four newest are kept on screen.
@@ -504,6 +560,7 @@ impl App {
         });
         self.selected = id.clone();
         self.composer.clear();
+        self.save_history();
         id
     }
 
@@ -534,7 +591,13 @@ impl App {
     /// With neither reachable the prompt stays on screen and the app says so.
     fn send(&mut self) {
         let text = std::mem::take(&mut self.composer);
-        self.send_text(text);
+        // If AI is working on a task (has a running task in timelines), queue this one
+        let has_running_task = self.timelines.values().any(|tl| tl.status == TaskStatus::Running);
+        if has_running_task {
+            self.queue_or_send(text);
+        } else {
+            self.send_text(text);
+        }
     }
 
     /// The send path on its own, so a prompt queued behind a cold engine can be
@@ -588,6 +651,7 @@ impl App {
                     self.seen_at.insert(id.clone(), events::now_stamp());
                     self.busy = true;
                     self.follow(id.clone());
+                    self.save_history();
                 }
                 Err(e) => {
                     // The prompt goes back to the composer rather than being
@@ -689,6 +753,156 @@ impl App {
             stats.chars_before, stats.chars_after, stats.elided, stats.deduped);
     }
 
+    // ---- History persistence ----
+
+    /// Where history is saved. Uses LOCALAPPDATA on Windows, XDG_DATA_HOME or
+    /// ~/.local/share on Linux, ~/Library/Application Support on macOS.
+    fn history_path() -> Option<PathBuf> {
+        let base = if cfg!(target_os = "windows") {
+            std::env::var("LOCALAPPDATA").ok().map(PathBuf::from)
+        } else if cfg!(target_os = "macos") {
+            std::env::var("HOME").ok().map(|h| PathBuf::from(h).join("Library/Application Support"))
+        } else {
+            std::env::var("XDG_DATA_HOME").ok().map(PathBuf::from)
+                .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/share")))
+        }?;
+        Some(base.join("fennec-desktop").join("history.json"))
+    }
+
+    /// Save current tasks and timelines to disk. Called on meaningful state changes.
+    fn save_history(&self) {
+        let Some(path) = Self::history_path() else { return };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let data = HistoryData {
+            tasks: self.tasks.iter().map(|t| HistoryTask {
+                id: t.id.clone(),
+                title: t.title.clone(),
+                status: match t.status {
+                    TaskStatus::Running => "Running",
+                    TaskStatus::Complete => "Complete",
+                    TaskStatus::NeedsAttention => "NeedsAttention",
+                    TaskStatus::Waiting => "Waiting",
+                    TaskStatus::AwaitingApproval => "AwaitingApproval",
+                }.to_string(),
+                updated: t.updated.clone(),
+                goal: t.goal.clone(),
+                draft: t.draft,
+            }).collect(),
+            timelines: self.timelines.iter().map(|(id, tl)| {
+                (id.clone(), HistoryTimeline {
+                    messages: tl.messages.iter().map(|m| HistoryMessage {
+                        role: match m.role {
+                            Role::User => "User",
+                            Role::Assistant => "Assistant",
+                            Role::Progress => "Progress",
+                        }.to_string(),
+                        text: m.text.clone(),
+                        time: m.time.clone(),
+                    }).collect(),
+                    summary: tl.summary.clone(),
+                    status: match tl.status {
+                        TaskStatus::Running => "Running",
+                        TaskStatus::Complete => "Complete",
+                        TaskStatus::NeedsAttention => "NeedsAttention",
+                        TaskStatus::Waiting => "Waiting",
+                        TaskStatus::AwaitingApproval => "AwaitingApproval",
+                    }.to_string(),
+                })
+            }).collect(),
+            seen_at: self.seen_at.clone(),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&data) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    /// Load history from disk. Called once at startup.
+    #[cfg(not(test))]
+    fn load_history(&mut self) {
+        let Some(path) = Self::history_path() else { return };
+        let Ok(contents) = std::fs::read_to_string(&path) else { return };
+        let Ok(data) = serde_json::from_str::<HistoryData>(&contents) else { return };
+        self.seen_at = data.seen_at;
+        self.tasks = data.tasks.into_iter().map(|t| Task {
+            id: t.id,
+            title: t.title,
+            status: match t.status.as_str() {
+                "Running" => TaskStatus::Running,
+                "Complete" => TaskStatus::Complete,
+                "NeedsAttention" => TaskStatus::NeedsAttention,
+                "Waiting" => TaskStatus::Waiting,
+                "AwaitingApproval" => TaskStatus::AwaitingApproval,
+                _ => TaskStatus::Waiting,
+            },
+            updated: t.updated,
+            goal: t.goal,
+            draft: t.draft,
+        }).collect();
+        for (id, htl) in data.timelines {
+            let mut tl = Timeline::default();
+            tl.messages = htl.messages.into_iter().map(|m| ChatMessage {
+                role: match m.role.as_str() {
+                    "User" => Role::User,
+                    "Assistant" => Role::Assistant,
+                    "Progress" => Role::Progress,
+                    _ => Role::User,
+                },
+                text: m.text,
+                time: m.time,
+            }).collect();
+            tl.summary = htl.summary;
+            tl.status = match htl.status.as_str() {
+                "Running" => TaskStatus::Running,
+                "Complete" => TaskStatus::Complete,
+                "NeedsAttention" => TaskStatus::NeedsAttention,
+                "Waiting" => TaskStatus::Waiting,
+                "AwaitingApproval" => TaskStatus::AwaitingApproval,
+                _ => TaskStatus::Waiting,
+            };
+            self.timelines.insert(id, tl);
+        }
+    }
+
+    // ---- Task queue ----
+
+    /// Queue a prompt when AI is busy. Returns true if queued, false if sent directly.
+    fn queue_or_send(&mut self, text: String) -> bool {
+        if !self.busy || self.task_queue.is_empty() && !self.is_working() {
+            self.send_text(text);
+            return false;
+        }
+        let id = format!("queued-{}", millis());
+        self.task_queue.push(QueuedTask {
+            id,
+            text,
+            queued_at: std::time::Instant::now(),
+        });
+        self.line = format!("Queued task ({} in queue). Will start when current task finishes.", self.task_queue.len());
+        true
+    }
+
+    /// Check if AI is currently working on a task.
+    fn is_working(&self) -> bool {
+        self.busy || self.timelines.values().any(|tl| tl.status == TaskStatus::Running)
+    }
+
+    /// Process the next queued task if AI is idle and queue is non-empty.
+    fn process_queue(&mut self) {
+        if !self.is_working() && !self.task_queue.is_empty() {
+            let next = self.task_queue.remove(0);
+            self.send_text(next.text);
+        }
+    }
+
+    /// Remove a task from the queue by index.
+    fn remove_from_queue(&mut self, index: usize) {
+        if index < self.task_queue.len() {
+            self.task_queue.remove(index);
+        }
+    }
+
     // ---- panes ----
 
     fn left_rail(&mut self, ui: &mut egui::Ui) {
@@ -700,37 +914,52 @@ impl App {
                     .size(11.0).color(if self.busy { BRAND } else { TEXT2 }));
             });
         });
-        ui.add_space(2.0);
-        ui.label(egui::RichText::new("WORKSPACE").size(10.5).color(TEXT2));
-        let paths = self.workspaces.clone();
-        let name = self.workspace_name();
-        egui::ComboBox::from_id_salt("workspace").selected_text(name).width(212.0).show_ui(ui, |ui| {
-            for (i, p) in paths.iter().enumerate() {
-                let label = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                if ui.selectable_value(&mut self.ws, i, label).clicked() {
-                    self.line = format!("Workspace: {}", pretty_path(&p.to_string_lossy()));
-                }
-            }
+        ui.add_space(8.0);
+
+        // ACTIVE WORKSPACE box
+        let ws = self.workspace_name();
+        let branch = git::repo_context(&self.workspace()).branch;
+        let branch_display = if branch.is_empty() { "main" } else { &branch };
+        egui::Frame::default().fill(SURFACE).corner_radius(RADIUS).inner_margin(8.0).show(ui, |ui| {
+            ui.label(egui::RichText::new("ACTIVE WORKSPACE").size(9.5).color(TEXT2).strong());
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(&ws).monospace().size(12.0).strong());
+            ui.label(egui::RichText::new(format!("{} · Local mode", branch_display)).size(10.5).color(TEXT2));
         });
-        if self.workspaces.is_empty() {
-            ui.label(egui::RichText::new("No suite repositories found — run `fennec update`.")
-                .size(11.0).color(WARN));
-        }
-        ui.separator();
+        ui.add_space(12.0);
+
+        // Navigation items
         if ui.selectable_label(self.nav == Nav::Coding, "Coding").clicked() {
             self.nav = Nav::Coding;
-        }
-        if ui.selectable_label(self.nav == Nav::Attention, "My Attention").clicked() {
-            self.nav = Nav::Attention;
         }
         if ui.selectable_label(false, "New Task").on_hover_text(format!("{MOD_HINT}+N")).clicked() {
             self.new_draft();
         }
+        // My Attention with badge
+        let attention_count = self.tasks.iter().filter(|t| 
+            matches!(t.status, TaskStatus::NeedsAttention | TaskStatus::AwaitingApproval) && !t.draft
+        ).count();
+        ui.horizontal(|ui| {
+            if ui.selectable_label(self.nav == Nav::Attention, "My Attention").clicked() {
+                self.nav = Nav::Attention;
+            }
+            if attention_count > 0 {
+                ui.add_space(4.0);
+                egui::Frame::default().fill(BRAND).corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| {
+                    ui.label(egui::RichText::new(attention_count.to_string()).size(10.0).color(egui::Color32::from_rgb(34, 18, 13)).strong());
+                });
+            }
+        });
         if ui.selectable_label(self.search_open, "Search").on_hover_text(format!("{MOD_HINT}+K")).clicked() {
             self.search_open = !self.search_open;
         }
+        ui.add_space(12.0);
         ui.separator();
-        ui.label(egui::RichText::new("RECENT TASKS").size(10.5).color(TEXT2));
+        ui.add_space(8.0);
+
+        // RECENT TASKS section
+        ui.label(egui::RichText::new("RECENT TASKS").size(10.5).color(TEXT2).strong());
+        ui.add_space(6.0);
         egui::ScrollArea::vertical().id_salt("tasks").max_height(340.0).show(ui, |ui| {
             let ids: Vec<String> = self.tasks.iter()
                 .filter(|t| match self.nav {
@@ -760,13 +989,6 @@ impl App {
                 ui.label(egui::RichText::new("No sessions yet. Send a prompt to start one.").size(11.5).color(TEXT2));
             }
         });
-        ui.separator();
-        let ws = self.workspace();
-        let ctx = git::repo_context(&ws);
-        ui.label(egui::RichText::new(format!("{} · {}", self.workspace_name(), if ctx.branch.is_empty() { "-" } else { &ctx.branch }))
-            .monospace().size(11.0).color(TEXT2));
-        ui.label(egui::RichText::new(ctx.changed_label()).size(11.0).color(TEXT2));
-        ui.label(egui::RichText::new(format!("local mode · {}", self.env.engine_url)).size(10.5).color(TEXT2));
     }
 
     fn right_panel(&mut self, ui: &mut egui::Ui) {
@@ -774,11 +996,11 @@ impl App {
             // Header with collapse button
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new("Context").size(13.0).strong());
-                    ui.label(egui::RichText::new("Workspace state").size(10.5).color(TEXT2));
+                    ui.label(egui::RichText::new("Workspace context").size(13.0).strong());
+                    ui.label(egui::RichText::new("Inspector").size(10.5).color(TEXT2));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    if ui.small_button("⊟").clicked() {
+                    if ui.small_button("⊟").on_hover_text("Collapse inspector").clicked() {
                         self.right_open = false;
                     }
                 });
@@ -789,24 +1011,23 @@ impl App {
             ui.label(egui::RichText::new("ACTIVE AGENTS").size(9.5).color(TEXT2).strong());
             ui.add_space(6.0);
             let tl = self.cur_timeline().cloned().unwrap_or_default();
+            let agent_count = if self.busy || tl.status == TaskStatus::Running { 1 } else { 0 };
+            ui.label(egui::RichText::new(format!("{} online", agent_count)).size(11.0).color(if agent_count > 0 { OK } else { TEXT2 }));
+            ui.add_space(4.0);
             egui::Frame::default().fill(SURFACE).corner_radius(RADIUS).inner_margin(8.0).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("🤖").size(16.0));
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new("Fennec").size(12.0).strong());
                         let task_title = self.tasks.iter().find(|t| t.id == self.selected)
-                            .map(|t| t.title.clone()).unwrap_or_else(|| "No task".into());
+                            .map(|t| t.title.clone()).unwrap_or_else(|| "Idle".into());
                         ui.label(egui::RichText::new(task_title).size(11.0).color(TEXT2));
-                        let status_text = if self.busy { "Running" } else { tl.status.label() };
+                        let status_text = if self.busy { "Running · now" } else { tl.status.label() };
                         let status_col = if self.busy { BRAND } else { status_color(tl.status) };
-                        ui.label(egui::RichText::new(format!("{} · now", status_text)).size(10.5).color(status_col));
+                        ui.label(egui::RichText::new(status_text).size(10.5).color(status_col));
                     });
                 });
             });
-            // Note about other agents
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("Jev and OpenBot remain capability-gated until outlet API, credentials, and lifecycle checks pass.")
-                .size(10.5).color(TEXT2));
             ui.add_space(12.0);
             ui.separator();
             ui.add_space(12.0);
@@ -824,7 +1045,7 @@ impl App {
                     let sub_text = if peers > 0 {
                         format!("{} delegation card(s)", peers)
                     } else {
-                        "2 outlets pending verification".to_string()
+                        "No active delegated agents".to_string()
                     };
                     ui.label(egui::RichText::new(sub_text).size(10.5).color(TEXT2));
                 });
@@ -836,7 +1057,7 @@ impl App {
                 ui.label(egui::RichText::new("📡").size(14.0));
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new("Processes").size(11.5).strong());
-                    let proc_text = if self.env.core_up { "ACP audit stream connected" } else { "Agent loop offline" };
+                    let proc_text = if self.env.core_up { "Event stream connected" } else { "Agent loop offline" };
                     let proc_col = if self.env.core_up { OK } else { TEXT2 };
                     ui.label(egui::RichText::new(proc_text).size(10.5).color(proc_col));
                 });
@@ -848,7 +1069,7 @@ impl App {
                 ui.label(egui::RichText::new("🔧").size(14.0));
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new("Skills").size(11.5).strong());
-                    ui.label(egui::RichText::new("Release, repo, benchmark audit").size(10.5).color(TEXT2));
+                    ui.label(egui::RichText::new("Repository inspection").size(10.5).color(TEXT2));
                 });
             });
             ui.add_space(6.0);
@@ -860,9 +1081,9 @@ impl App {
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new("Artifacts").size(11.5).strong());
                     let art_text = if arts.is_empty() {
-                        "Results graphs and release evidence".to_string()
+                        "No task artifacts".to_string()
                     } else {
-                        format!("{} file(s) written", arts.len())
+                        format!("{} task artifact(s)", arts.len())
                     };
                     ui.label(egui::RichText::new(art_text).size(10.5).color(TEXT2));
                 });
@@ -878,7 +1099,7 @@ impl App {
                     let web_text = if web > 0 {
                         format!("{} source(s) fetched", web)
                     } else {
-                        "Backend and runtime evidence".to_string()
+                        "No linked readings".to_string()
                     };
                     ui.label(egui::RichText::new(web_text).size(10.5).color(TEXT2));
                 });
@@ -890,32 +1111,9 @@ impl App {
                 ui.label(egui::RichText::new("🔗").size(14.0));
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new("Sources").size(11.5).strong());
-                    ui.label(egui::RichText::new("9 repos · docs · test matrices").size(10.5).color(TEXT2));
+                    ui.label(egui::RichText::new("No task sources").size(10.5).color(TEXT2));
                 });
             });
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(12.0);
-
-            // Release & Verification section
-            ui.label(egui::RichText::new("RELEASE & VERIFICATION").size(9.5).color(TEXT2).strong());
-            ui.add_space(6.0);
-
-            let releases = vec![
-                ("1.9.0", "reconcile & verify", WARN),
-                ("2.0.0", "version/test gate", OK),
-                ("2.5.0", "held by user", TEXT2),
-                ("Matrix", "cross-repo pending", WARN),
-            ];
-            for (ver, status, col) in releases {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(ver).monospace().size(11.0));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(status).size(10.5).color(col));
-                    });
-                });
-                ui.add_space(2.0);
-            }
             ui.add_space(12.0);
             ui.separator();
             ui.add_space(12.0);
@@ -1037,24 +1235,76 @@ impl App {
         if send_now {
             self.send();
         }
+        // Task queue panel - only visible when AI is working and there are queued tasks
+        if self.is_working() && !self.task_queue.is_empty() {
+            let queue_len = self.task_queue.len();
+            let mut remove_idx: Option<usize> = None;
+            egui::Panel::bottom("task_queue")
+                .frame(egui::Frame::default().fill(PANEL).corner_radius(RADIUS).inner_margin(8.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("☰").size(14.0).color(TEXT2));
+                        ui.label(egui::RichText::new(format!("{} item{}", queue_len, if queue_len == 1 { "" } else { "s" }))
+                            .size(12.0).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.hyperlink("View all").clicked() {
+                                // Could open a full task queue view in the future
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical().max_height(80.0).show(ui, |ui| {
+                        for (i, task) in self.task_queue.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let status_label = if i == 0 { "Next" } else { "Queued" };
+                                let status_col = if i == 0 { WARN } else { TEXT2 };
+                                ui.label(egui::RichText::new(status_label).size(10.5).color(status_col).strong());
+                                ui.label(egui::RichText::new(truncate(&task.text, 60)).size(11.5));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button("×").on_hover_text("Remove from queue").clicked() {
+                                        remove_idx = Some(i);
+                                    }
+                                });
+                            });
+                            ui.add_space(2.0);
+                        }
+                    });
+                });
+            if let Some(i) = remove_idx {
+                self.remove_from_queue(i);
+            }
+        }
         let ws = self.workspace_name();
         let branch = git::repo_context(&self.workspace()).branch;
-        ui.label(egui::RichText::new(format!("{ws} / {}", if branch.is_empty() { "-" } else { &branch }))
-            .monospace().size(11.0).color(TEXT2));
-        let title = self.tasks.iter().find(|t| t.id == self.selected).map(|t| t.title.clone()).unwrap_or_else(|| "No task selected".into());
-        let status = self.cur_timeline().map(|t| t.status).unwrap_or(TaskStatus::Waiting);
+        let branch_display = if branch.is_empty() { "main" } else { &branch };
+        
+        // Header with workspace/branch and status badge
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(title).size(19.0).strong().color(TEXT));
+            ui.label(egui::RichText::new(format!("{ws} · {branch_display}"))
+                .monospace().size(11.0).color(TEXT2));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Context").clicked() {
+                if ui.small_button("Context").on_hover_text("Toggle inspector").clicked() {
                     self.right_open = !self.right_open;
                 }
-                if self.busy && ui.small_button("Stop").clicked() {
+                if self.busy && ui.small_button("Stop").on_hover_text("Cancel current task").clicked() {
                     self.stop();
                 }
-                ui.colored_label(status_color(status), format!("● {}", status.label()));
+                let status = self.cur_timeline().map(|t| t.status).unwrap_or(TaskStatus::Waiting);
+                let status_text = if self.busy { "Running" } else { status.label() };
+                let status_col = if self.busy { BRAND } else { status_color(status) };
+                egui::Frame::default().fill(status_col.linear_multiply(0.2)).corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+                    ui.label(egui::RichText::new(status_text).size(10.5).color(status_col).strong());
+                });
             });
         });
+        ui.add_space(8.0);
+        
+        let title = self.tasks.iter().find(|t| t.id == self.selected).map(|t| t.title.clone()).unwrap_or_else(|| "No task selected".into());
+        ui.label(egui::RichText::new(&title).size(19.0).strong().color(TEXT));
+        ui.label(egui::RichText::new("Chronological local-agent activity and verification for the active repository.")
+            .size(11.5).color(TEXT2));
+        ui.add_space(8.0);
+        
         if !core_up {
             let note = if engine_up {
                 "Agent loop offline — direct chat mode: tokens stream from the engine; the tool timeline is unavailable."
@@ -1073,18 +1323,45 @@ impl App {
                 ui.label(egui::RichText::new("Nothing has happened in this task yet. The timeline fills as the loop reads, edits, runs and tests.")
                     .size(13.0).color(TEXT2));
             }
-            for m in &tl.messages {
+            let timeline_id = self.selected.clone();
+            let mut thought_toggle: Option<String> = None;
+            for (idx, m) in tl.messages.iter().enumerate() {
                 let (who, col) = match m.role {
                     Role::User => ("You", TEXT),
                     Role::Assistant => ("Fennec", BRAND),
                     Role::Progress => ("Agent", TEXT2),
                 };
+                // Progress messages (thoughts/reasoning) are collapsible, collapsed by default
+                let is_thought = m.role == Role::Progress;
+                let thought_key = format!("{}:{}", timeline_id, idx);
+                let is_collapsed = is_thought && !self.collapsed_thoughts.contains(&thought_key);
+                
                 ui.horizontal(|ui| {
+                    if is_thought {
+                        let arrow = if is_collapsed { "▸" } else { "▾" };
+                        if ui.small_button(arrow).clicked() {
+                            thought_toggle = Some(thought_key.clone());
+                        }
+                    }
                     ui.label(egui::RichText::new(who).size(11.5).strong().color(col));
+                    if is_thought {
+                        ui.label(egui::RichText::new("thinking").size(10.0).color(TEXT2).italics());
+                    }
                     ui.label(egui::RichText::new(&m.time).monospace().size(10.5).color(TEXT2));
                 });
-                render_rich(ui, &m.text, m.role == Role::Progress);
+                // Only render the body if not collapsed
+                if !is_collapsed {
+                    render_rich(ui, &m.text, m.role == Role::Progress);
+                }
                 ui.add_space(10.0);
+            }
+            // Apply thought collapse toggles
+            if let Some(key) = thought_toggle {
+                if self.collapsed_thoughts.contains(&key) {
+                    self.collapsed_thoughts.remove(&key);
+                } else {
+                    self.collapsed_thoughts.insert(key);
+                }
             }
             if tl.streaming && !tl.streaming_text.is_empty() {
                 ui.horizontal(|ui| {
@@ -1391,11 +1668,6 @@ impl App {
     }
 }
 
-fn expand_button(ui: &mut egui::Ui, open: bool) -> egui::Response {
-    ui.add(egui::Button::new(egui::RichText::new(if open { "Hide result" } else { "Show result" }).size(10.5).color(TEXT2))
-        .fill(HOVER).small())
-}
-
 /// A unified diff, line-tinted. Long diffs are truncated with a note rather
 /// than paged: this is a preview, and the full text is one `copy diff` away.
 fn render_diff(ui: &mut egui::Ui, text: &str) {
@@ -1680,6 +1952,7 @@ fn time_ago(stamp: &str) -> String {
 /// One `(installed, line)` row per outlet the agent server reported. The three
 /// states are three different claims: never probed, probed but empty, and
 /// probed with real data — so an offline loop can never read as "not installed".
+#[cfg(test)]
 fn outlet_rows(env: &Env) -> Vec<(bool, String)> {
     if !env.outlets_known {
         return vec![(false, "Outlets: unknown (agent loop offline)".into())];
@@ -1808,13 +2081,6 @@ fn brand_mark(ui: &mut egui::Ui, brand: &Option<egui::TextureHandle>, size: f32)
     if let Some(t) = brand {
         ui.add(egui::Image::from_texture(t).fit_to_exact_size(egui::vec2(size, size)));
     }
-}
-
-/// Windows accepts both separators, so a manifest root written with forward
-/// slashes and joined by `PathBuf` displays as `D:/Fennec-Suite\fennec-cli`.
-/// Display normalises it; nothing on disk is renamed.
-fn pretty_path(s: &str) -> String {
-    if cfg!(windows) { s.replace('/', "\\") } else { s.to_string() }
 }
 
 fn main() -> Result<(), eframe::Error> {
