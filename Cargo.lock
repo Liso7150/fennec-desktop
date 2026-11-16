@@ -1149,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "fennec-desktop"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "eframe",
  "fennec-client",
@@ -1165,7 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "fennec-economy"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "fennec-pyjson",
  "serde_json",
