@@ -1,7 +1,8 @@
 [package]
 name = "fennec-desktop"
 version = "1.0.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/Liso7150/fennec-desktop"
 description = "Fennec desktop: a native Rust (egui) coding-agent workspace. UI and glue only — the backend protocols come from fennec-core's fennec-client crate, context budgeting from fennec-economy, and the suite layout from fennec-environment-setup's repos.json manifest."
