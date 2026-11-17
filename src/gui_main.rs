@@ -158,6 +158,7 @@ struct App {
     attention_only: bool,
     right_open: bool,
     search_open: bool,
+    settings_open: bool,
     expanded: HashSet<String>,
     /// Thought/reasoning rows the user has opened; collapsed is the default.
     open_thoughts: HashSet<String>,
@@ -303,7 +304,7 @@ impl App {
             tasks: Vec::new(), seen_at: HashMap::new(), selected: String::new(),
             timelines: HashMap::new(), replayed: HashSet::new(), composer, search,
             allow_write: false, allow_shell: false, allow_web: false, ask_each: false,
-            attention_only: false, right_open: true, search_open: false,
+            attention_only: false, right_open: true, search_open: false, settings_open: false,
             expanded: HashSet::new(), open_thoughts: HashSet::new(),
             toasts: Vec::new(), line: String::new(), pending_send: None,
             composer_restore: None, chat_cancel: None, rx, tx, busy: false,
@@ -1322,11 +1323,16 @@ impl Render for App {
         }
         self.toasts.retain(|t| t.at.elapsed() < Duration::from_secs(6));
         let t = cx.theme().clone();
+        let settings_open = self.settings_open;
         div().flex().flex_col().size_full().bg(t.background).text_color(t.foreground)
             .child(self.topbar(cx))
             .child(div().flex().flex_1().overflow_hidden()
                 .child(self.left(cx))
-                .child(self.center(cx))
+                .child(if settings_open {
+                    self.settings_panel(cx).into_any_element()
+                } else {
+                    self.center(cx).into_any_element()
+                })
                 .children(self.right_open.then(|| self.right(cx))))
     }
 }
@@ -1406,9 +1412,12 @@ impl App {
             } else {
                 "No matching task."
             }).text_size(px(11.5)).text_color(t.muted_foreground))))
-            .child(div().mt_auto().pt_3().border_t_1().border_color(t.border)
-                .child(Label::new("Liso7150").text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD))
-                .child(Label::new("Local account").text_size(px(11.0)).text_color(t.muted_foreground)));
+            .child(div().mt_auto().pt_3().border_t_1().border_color(t.border).flex().items_center().justify_between()
+                .child(div().flex().flex_col()
+                    .child(Label::new("Liso7150").text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD))
+                    .child(Label::new("Local account").text_size(px(11.0)).text_color(t.muted_foreground)))
+                .child(Button::new("nav-settings").label("⚙").ghost().small()
+                    .on_click(cx.listener(|a, _, _, cx| { a.settings_open = !a.settings_open; cx.notify(); }))));
         rail
     }
 
@@ -1474,6 +1483,48 @@ impl App {
             col = col.child(self.queue(cx));
         }
         col.child(self.composer(cx))
+    }
+
+    fn settings_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        div().flex().flex_col().flex_1().overflow_hidden()
+            .child(div().flex().items_center().justify_between().px_5().pt_4().pb_3().border_b_1().border_color(t.border)
+                .child(Label::new("Settings").text_size(px(20.0)).font_weight(FontWeight::BOLD))
+                .child(Button::new("settings-close").label("✕").ghost().small()
+                    .on_click(cx.listener(|a, _, _, cx| { a.settings_open = false; cx.notify(); }))))
+            .child(div().flex().flex_1().overflow_y_scrollbar().p_5().gap_6().flex_col()
+                // Appearance section
+                .child(div().flex().flex_col().gap_3()
+                    .child(Label::new("Appearance").text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD))
+                    .child(div().flex().items_center().justify_between().p_3().rounded_md().border_1().border_color(t.border)
+                        .child(Label::new("Theme").text_size(px(13.0)))
+                        .child(Label::new("Dark").text_size(px(13.0)).text_color(t.muted_foreground)))
+                    .child(div().flex().items_center().justify_between().p_3().rounded_md().border_1().border_color(t.border)
+                        .child(Label::new("Font size").text_size(px(13.0)))
+                        .child(Label::new("14px").text_size(px(13.0)).text_color(t.muted_foreground))))
+                // User section
+                .child(div().flex().flex_col().gap_3().mt_4()
+                    .child(Label::new("User").text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD))
+                    .child(div().p_3().rounded_md().border_1().border_color(t.border)
+                        .child(div().flex().flex_col().gap_1()
+                            .child(Label::new("Username").text_size(px(11.0)).text_color(t.muted_foreground))
+                            .child(Label::new("Liso7150").text_size(px(13.0)).font_weight(FontWeight::MEDIUM))))
+                    .child(div().p_3().rounded_md().border_1().border_color(t.border)
+                        .child(div().flex().flex_col().gap_1()
+                            .child(Label::new("Account type").text_size(px(11.0)).text_color(t.muted_foreground))
+                            .child(Label::new("Local account").text_size(px(13.0)).font_weight(FontWeight::MEDIUM)))))
+                // Other section
+                .child(div().flex().flex_col().gap_3().mt_4()
+                    .child(Label::new("Other").text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD))
+                    .child(div().flex().items_center().justify_between().p_3().rounded_md().border_1().border_color(t.border)
+                        .child(Label::new("Auto-save conversations").text_size(px(13.0)))
+                        .child(Label::new("On").text_size(px(13.0)).text_color(t.success)))
+                    .child(div().flex().items_center().justify_between().p_3().rounded_md().border_1().border_color(t.border)
+                        .child(Label::new("Send diagnostics").text_size(px(13.0)))
+                        .child(Label::new("Off").text_size(px(13.0)).text_color(t.muted_foreground)))
+                    .child(div().flex().items_center().justify_between().p_3().rounded_md().border_1().border_color(t.border)
+                        .child(Label::new("Version").text_size(px(13.0)))
+                        .child(Label::new("1.0.0").text_size(px(13.0)).text_color(t.muted_foreground)))))
     }
 
     fn timeline(&self, tl: &Timeline, cx: &mut Context<Self>) -> impl IntoElement {
