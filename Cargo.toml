@@ -5,11 +5,16 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/Liso7150/fennec-desktop"
-description = "Fennec desktop: a native Rust (egui) coding-agent workspace. UI and glue only — the backend protocols come from fennec-core's fennec-client crate, context budgeting from fennec-economy, and the suite layout from fennec-environment-setup's repos.json manifest."
+description = "Fennec desktop: a native Rust coding-agent workspace. UI and glue only — the backend protocols come from fennec-core's fennec-client crate, context budgeting from fennec-economy, and the suite layout from fennec-environment-setup's repos.json manifest. Ships the egui binary and the gpui-kit GUI binary."
 
 [[bin]]
 name = "fennec-desktop"
 path = "src/main.rs"
+
+[[bin]]
+name = "fennec-desktop-gui"
+path = "src/gui_main.rs"
+required-features = ["gui"]
 
 [lib]
 name = "fennec_desktop"
@@ -17,6 +22,7 @@ path = "src/lib.rs"
 
 [dependencies]
 eframe = "0.37"
+gpui-kit = { version = "0.10.0", optional = true }
 image = { version = "0.24", default-features = false, features = ["png"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde = { version = "1", features = ["derive"] }
@@ -26,6 +32,10 @@ hex = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 fennec-client = { path = "../fennec-core/src/fennec-client" }
 fennec-economy = { path = "../fennec-economy" }
+
+[features]
+default = []
+gui = ["gpui-kit"]
 
 [profile.release]
 opt-level = 3
