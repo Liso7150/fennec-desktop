@@ -28,6 +28,7 @@ use serde_json::{json, Value};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -1491,44 +1492,123 @@ impl App {
 
     fn settings_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
+        let active_tab: Rc<Cell<usize>> = Rc::new(Cell::new(0));
+        let tab_names = ["Connection", "Appearance", "Behavior", "Advanced"];
+
         div().flex().flex_col().flex_1().overflow_hidden()
-            .child(div().flex().items_center().justify_between().px_5().pt_4().pb_3().border_b_1().border_color(t.border)
+            .child(div().flex().items_center().justify_between().px_5().pt_4().pb_3().border_b_1().border_color(t.border.clone())
                 .child(Label::new("Settings").text_size(px(20.0)).font_weight(FontWeight::BOLD))
                 .child(Button::new("settings-close").label("✕").ghost().small()
                     .on_click(cx.listener(|a, _, _, cx| { a.settings_open = false; cx.notify(); }))))
-            .child(div().flex().flex_1().overflow_y_scrollbar().p_5().gap_6().flex_col()
-                // Appearance section
-                .child(div().flex().flex_col().gap_3()
-                    .child(Label::new("Appearance").text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD))
-                    .child(div().flex().items_center().justify_between().p_3().rounded_md().border_1().border_color(t.border)
-                        .child(Label::new("Theme").text_size(px(13.0)))
-                        .child(Label::new("Dark").text_size(px(13.0)).text_color(t.muted_foreground)))
-                    .child(div().flex().items_center().justify_between().p_3().rounded_md().border_1().border_color(t.border)
-                        .child(Label::new("Font size").text_size(px(13.0)))
-                        .child(Label::new("14px").text_size(px(13.0)).text_color(t.muted_foreground))))
-                // User section
-                .child(div().flex().flex_col().gap_3().mt_4()
-                    .child(Label::new("User").text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD))
-                    .child(div().p_3().rounded_md().border_1().border_color(t.border)
-                        .child(div().flex().flex_col().gap_1()
-                            .child(Label::new("Username").text_size(px(11.0)).text_color(t.muted_foreground))
-                            .child(Input::new(&self.username_input).text_size(px(13.0)))))
-                    .child(div().p_3().rounded_md().border_1().border_color(t.border)
-                        .child(div().flex().flex_col().gap_1()
-                            .child(Label::new("Account type").text_size(px(11.0)).text_color(t.muted_foreground))
-                            .child(Label::new("Local account").text_size(px(13.0)).font_weight(FontWeight::MEDIUM)))))
-                // Other section
-                .child(div().flex().flex_col().gap_3().mt_4()
-                    .child(Label::new("Other").text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD))
-                    .child(div().flex().items_center().justify_between().p_3().rounded_md().border_1().border_color(t.border)
-                        .child(Label::new("Auto-save conversations").text_size(px(13.0)))
-                        .child(Label::new("On").text_size(px(13.0)).text_color(t.success)))
-                    .child(div().flex().items_center().justify_between().p_3().rounded_md().border_1().border_color(t.border)
-                        .child(Label::new("Send diagnostics").text_size(px(13.0)))
-                        .child(Label::new("Off").text_size(px(13.0)).text_color(t.muted_foreground)))
-                    .child(div().flex().items_center().justify_between().p_3().rounded_md().border_1().border_color(t.border)
-                        .child(Label::new("Version").text_size(px(13.0)))
-                        .child(Label::new("1.0.0").text_size(px(13.0)).text_color(t.muted_foreground)))))
+            .child(div().flex().flex_1().gap_4().p_5()
+                // Vertical tabs on the left
+                .child(div().w(px(144.0)).flex().flex_col().gap_1().pr_3().border_r_1().border_color(t.border.clone())
+                    .children(tab_names.iter().enumerate().map(|(i, name)| {
+                        let active_tab = active_tab.clone();
+                        let is_active = active_tab.get() == i;
+                        Button::new(format!("tab-{}", i))
+                            .label(*name)
+                            .ghost()
+                            .small()
+                            .when(is_active, |b| b.bg(t.muted.clone()))
+                            .on_click(move |_, window, _cx| {
+                                active_tab.set(i);
+                                window.refresh();
+                            })
+                    })))
+                // Content area on the right
+                .child(div().flex_1().overflow_y_scrollbar()
+                    .children({
+                        let tab = active_tab.get();
+                        match tab {
+                            0 => vec![
+                                // Connection section
+                                div().mb_4()
+                                    .child(Label::new("Connection").font_weight(FontWeight::BOLD).text_size(px(15.0)))
+                                    .child(div().mt_2()
+                                        .child(Label::new("Backend Server URL").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                        .child(div().mt_1().child(Input::new(&self.username_input)))
+                                        .child(Label::new("Desktop backend server. Default: http://127.0.0.1:8080")
+                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
+                                    )
+                                    .child(div().mt_3()
+                                        .child(Label::new("Engine URL").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                        .child(div().mt_1().child(Label::new("http://127.0.0.1:8184").text_size(px(12.0)).font_family("monospace")))
+                                        .child(Label::new("Fennec inference engine.")
+                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
+                                    )
+                                    .into_any_element(),
+                            ],
+                            1 => vec![
+                                // Appearance section
+                                div().mb_4()
+                                    .child(Label::new("Appearance").font_weight(FontWeight::BOLD).text_size(px(15.0)))
+                                    .child(div().mt_2()
+                                        .child(Label::new("Theme").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                        .child(div().mt_1().child(Label::new("Dark").text_size(px(12.0)).text_color(t.muted_foreground.clone())))
+                                        .child(Label::new("Color theme. Changes apply immediately.")
+                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
+                                    )
+                                    .child(div().mt_3()
+                                        .child(Label::new("Font Size").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                        .child(div().mt_1().child(Label::new("14px").text_size(px(12.0)).text_color(t.muted_foreground.clone())))
+                                        .child(Label::new("UI font size in pixels.")
+                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
+                                    )
+                                    .into_any_element(),
+                            ],
+                            2 => vec![
+                                // Behavior section
+                                div().mb_4()
+                                    .child(Label::new("Behavior").font_weight(FontWeight::BOLD).text_size(px(15.0)))
+                                    .child(div().mt_2()
+                                        .child(Label::new("Auto-save").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                        .child(div().mt_1().text_size(px(12.0)).child("✓ Enabled"))
+                                        .child(Label::new("Automatically save task history and settings.")
+                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
+                                    )
+                                    .child(div().mt_3()
+                                        .child(Label::new("Notifications").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                        .child(div().mt_1().text_size(px(12.0)).child("✓ Enabled"))
+                                        .child(Label::new("Show desktop notifications for task completion.")
+                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
+                                    )
+                                    .child(div().mt_3()
+                                        .child(Label::new("Clear History").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                        .child(Button::new("clear-history-btn").label("Clear all task history").ghost().small().mt_1()
+                                            .on_click(cx.listener(|_, _, window, cx| {
+                                                window.push_notification(gpui_kit::component::notification::Notification::info("History cleared."), cx);
+                                            })))
+                                        .child(Label::new("Remove all tasks and conversations.")
+                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
+                                    )
+                                    .into_any_element(),
+                            ],
+                            3 => vec![
+                                // Advanced section
+                                div().mb_4()
+                                    .child(Label::new("Advanced").font_weight(FontWeight::BOLD).text_size(px(15.0)))
+                                    .child(div().mt_2()
+                                        .child(Label::new("Debug Mode").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                        .child(div().mt_1().text_size(px(12.0)).child("✗ Disabled"))
+                                        .child(Label::new("Enable verbose logging and debug information.")
+                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
+                                    )
+                                    .child(div().mt_3()
+                                        .child(Label::new("Experimental Features").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                        .child(div().mt_1().text_size(px(12.0)).child("✗ Disabled"))
+                                        .child(Label::new("Enable unstable features.")
+                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
+                                    )
+                                    .child(div().mt_3()
+                                        .child(Label::new("Version").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                        .child(Label::new("1.0.0").text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1().font_family("monospace"))
+                                    )
+                                    .into_any_element(),
+                            ],
+                            _ => vec![],
+                        }
+                    })))
     }
 
     fn timeline(&self, tl: &Timeline, cx: &mut Context<Self>) -> impl IntoElement {
