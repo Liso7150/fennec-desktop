@@ -178,6 +178,7 @@ pub struct Task {
     pub updated: String,
     pub goal: String,
     pub draft: bool,
+    pub workspace_id: Option<String>,
 }
 
 /// What the timeline can receive: backend events, or a chat token stream.

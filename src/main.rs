@@ -43,6 +43,7 @@ struct HistoryTask {
     updated: String,
     goal: String,
     draft: bool,
+    workspace_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -300,6 +301,7 @@ impl App {
                         status,
                         draft: false,
                         id,
+                        workspace_id: None,
                     });
                 }
                 let _ = tx2.send(UiEvent::Sessions(tasks));
@@ -557,6 +559,7 @@ impl App {
             updated: "now".into(),
             goal: String::new(),
             draft: true,
+            workspace_id: None,
         });
         self.selected = id.clone();
         self.composer.clear();
@@ -645,7 +648,7 @@ impl App {
                     tl.streaming = true;
                     self.tasks.insert(0, Task {
                         id: id.clone(), title: truncate(&text, 58), status: TaskStatus::Running,
-                        updated: "now".into(), goal: text, draft: false,
+                        updated: "now".into(), goal: text, draft: false, workspace_id: None,
                     });
                     self.selected = id.clone();
                     self.seen_at.insert(id.clone(), events::now_stamp());
@@ -789,6 +792,7 @@ impl App {
                 updated: t.updated.clone(),
                 goal: t.goal.clone(),
                 draft: t.draft,
+                workspace_id: t.workspace_id.clone(),
             }).collect(),
             timelines: self.timelines.iter().map(|(id, tl)| {
                 (id.clone(), HistoryTimeline {
@@ -839,6 +843,7 @@ impl App {
             updated: t.updated,
             goal: t.goal,
             draft: t.draft,
+            workspace_id: t.workspace_id,
         }).collect();
         for (id, htl) in data.timelines {
             let mut tl = Timeline::default();

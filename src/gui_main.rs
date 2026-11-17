@@ -23,6 +23,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use gpui::hsla;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::cell::Cell;
@@ -33,6 +34,139 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
+
+// ---- Theme presets ----
+
+#[derive(Clone, Debug)]
+struct ThemePreset {
+    name: &'static str,
+    mode: ThemeMode,
+    accent: [f32; 4],
+    background: [f32; 4],
+    muted: [f32; 4],
+    border: [f32; 4],
+    theme_id: &'static str,
+}
+
+impl ThemePreset {
+    fn apply(&self, cx: &mut gpui::App) {
+        Theme::update(cx, |theme| {
+            theme.mode = self.mode;
+            theme.colors.accent = hsla(self.accent[0], self.accent[1], self.accent[2], self.accent[3]);
+            theme.colors.primary = hsla(self.accent[0], self.accent[1], self.accent[2], self.accent[3]);
+            theme.colors.button_primary = hsla(self.accent[0], self.accent[1], self.accent[2], self.accent[3]);
+            theme.colors.link = hsla(self.accent[0], self.accent[1], self.accent[2], self.accent[3]);
+            theme.colors.background = hsla(self.background[0], self.background[1], self.background[2], self.background[3]);
+            theme.colors.muted = hsla(self.muted[0], self.muted[1], self.muted[2], self.muted[3]);
+            theme.colors.border = hsla(self.border[0], self.border[1], self.border[2], self.border[3]);
+        });
+    }
+
+    fn id(&self) -> &str {
+        self.theme_id
+    }
+}
+
+fn theme_presets() -> Vec<ThemePreset> {
+    vec![
+        ThemePreset {
+            name: "Dark", mode: ThemeMode::Dark,
+            accent: [210.0/360.0, 0.5, 0.5, 1.0],
+            background: [0.0, 0.0, 0.08, 1.0],
+            muted: [0.0, 0.0, 0.12, 1.0],
+            border: [0.0, 0.0, 0.18, 1.0],
+            theme_id: "dark",
+        },
+        ThemePreset {
+            name: "Light", mode: ThemeMode::Light,
+            accent: [210.0/360.0, 0.5, 0.5, 1.0],
+            background: [0.0, 0.0, 0.98, 1.0],
+            muted: [0.0, 0.0, 0.94, 1.0],
+            border: [0.0, 0.0, 0.88, 1.0],
+            theme_id: "light",
+        },
+        ThemePreset {
+            name: "Ocean", mode: ThemeMode::Dark,
+            accent: [55.0/360.0, 0.7, 0.5, 1.0],
+            background: [0.6, 0.4, 0.08, 1.0],
+            muted: [0.6, 0.35, 0.12, 1.0],
+            border: [0.6, 0.3, 0.2, 1.0],
+            theme_id: "ocean",
+        },
+        ThemePreset {
+            name: "Forest", mode: ThemeMode::Dark,
+            accent: [35.0/360.0, 0.6, 0.45, 1.0],
+            background: [0.33, 0.3, 0.06, 1.0],
+            muted: [0.33, 0.25, 0.1, 1.0],
+            border: [0.33, 0.2, 0.16, 1.0],
+            theme_id: "forest",
+        },
+        ThemePreset {
+            name: "Sunset", mode: ThemeMode::Dark,
+            accent: [10.0/360.0, 0.75, 0.55, 1.0],
+            background: [0.05, 0.5, 0.08, 1.0],
+            muted: [0.05, 0.45, 0.12, 1.0],
+            border: [0.05, 0.4, 0.2, 1.0],
+            theme_id: "sunset",
+        },
+        ThemePreset {
+            name: "Lavender", mode: ThemeMode::Dark,
+            accent: [75.0/360.0, 0.55, 0.6, 1.0],
+            background: [0.75, 0.3, 0.08, 1.0],
+            muted: [0.75, 0.25, 0.12, 1.0],
+            border: [0.75, 0.2, 0.2, 1.0],
+            theme_id: "lavender",
+        },
+        ThemePreset {
+            name: "Coffee", mode: ThemeMode::Dark,
+            accent: [30.0/360.0, 0.6, 0.65, 1.0],
+            background: [0.07, 0.5, 0.1, 1.0],
+            muted: [0.07, 0.45, 0.15, 1.0],
+            border: [0.07, 0.4, 0.22, 1.0],
+            theme_id: "coffee",
+        },
+    ]
+}
+
+fn find_preset_index(theme_id: &str) -> usize {
+    theme_presets().iter().position(|p| p.id() == theme_id).unwrap_or(0)
+}
+
+// ---- Settings persistence ----
+
+#[derive(Serialize, Deserialize, Default, Clone)]
+struct Settings {
+    server_url: Option<String>,
+    engine_url: Option<String>,
+    model: Option<String>,
+    theme: Option<String>,
+    font_size: Option<f32>,
+    auto_save: Option<bool>,
+    notifications: Option<bool>,
+    debug_mode: Option<bool>,
+    experimental_features: Option<bool>,
+}
+
+fn settings_path() -> PathBuf {
+    let dir = std::env::current_exe().ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    dir.join("gui_settings.json")
+}
+
+fn load_settings() -> Settings {
+    let path = settings_path();
+    std::fs::read_to_string(&path).ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_settings(settings: &Settings) {
+    let path = settings_path();
+    if let Ok(json) = serde_json::to_string_pretty(settings) {
+        let _ = std::fs::write(&path, json);
+    }
+}
 
 // ---- History persistence (shared with the egui binary) ----
 
@@ -83,6 +217,84 @@ const VISION_OK: &str = "engine reports vision";
 
 /// Cmd on macOS, Ctrl everywhere else — spelled the way the key is bound.
 const MOD_HINT: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+struct Workspace {
+    id: String,
+    name: String,
+    icon: String,
+    color: String,
+    source_folders: Vec<String>,
+    indexed: bool,
+}
+
+impl Workspace {
+    fn new(name: String) -> Self {
+        Self {
+            id: format!("ws-{}", millis()),
+            name,
+            icon: "folder".to_string(),
+            color: "orange".to_string(),
+            source_folders: vec![],
+            indexed: true,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct WorkspaceStore {
+    workspaces: Vec<Workspace>,
+    active_id: Option<String>,
+}
+
+/// Permission mode for agent actions. AskEveryTime requires approval for each
+/// action, AutoApprove only asks for risky operations, FullAccess never asks.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+enum PermissionMode {
+    AskEveryTime,
+    AutoApprove,
+    FullAccess,
+}
+
+impl Default for PermissionMode {
+    fn default() -> Self {
+        Self::AskEveryTime
+    }
+}
+
+impl PermissionMode {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::AskEveryTime => "Ask every time",
+            Self::AutoApprove => "Auto approve",
+            Self::FullAccess => "Full access",
+        }
+    }
+
+    fn description(&self) -> &'static str {
+        match self {
+            Self::AskEveryTime => "Always ask before commands, external edits, and internet use.",
+            Self::AutoApprove => "Only asks when a potential risk is detected.",
+            Self::FullAccess => "Never ask, with full access to your files, terminal, and the internet.",
+        }
+    }
+
+    fn icon(&self) -> &'static str {
+        match self {
+            Self::AskEveryTime => "🛡",
+            Self::AutoApprove => "▶",
+            Self::FullAccess => "⚠",
+        }
+    }
+
+    fn color(&self, t: &gpui_kit::component::Theme) -> gpui::Hsla {
+        match self {
+            Self::AskEveryTime => t.foreground,
+            Self::AutoApprove => t.foreground,
+            Self::FullAccess => t.yellow,
+        }
+    }
+}
 
 /// What the supervisor thread pushes to the UI. Every field is reported-or-
 /// unknown; nothing defaults to a value that merely looks plausible.
@@ -137,6 +349,8 @@ struct App {
     suite: suite::Suite,
     workspaces: Vec<PathBuf>,
     ws: usize,
+    workspace_items: Vec<Workspace>,
+    active_workspace_id: Option<String>,
     core: Core,
     engine: Engine,
     env: Env,
@@ -150,13 +364,9 @@ struct App {
     composer: Entity<InputState>,
     search: Entity<InputState>,
     username_input: Entity<InputState>,
-    allow_write: bool,
-    allow_shell: bool,
-    allow_web: bool,
-    /// `require_approval`: the switches stop admitting calls and every gated
-    /// one is asked about instead. The answer, not a box ticked at start, is
-    /// what lets a write through.
-    ask_each: bool,
+    /// Permission mode: AskEveryTime requires approval for each action,
+    /// AutoApprove only asks for risky operations, FullAccess never asks.
+    permission_mode: PermissionMode,
     attention_only: bool,
     right_open: bool,
     search_open: bool,
@@ -185,6 +395,13 @@ struct App {
     timeline_scroll: ScrollHandle,
     follow_tail: Cell<bool>,
     _task: gpui_kit::Task<()>,
+    model: String,
+    theme: String,
+    font_size: f32,
+    auto_save: bool,
+    notifications: bool,
+    debug_mode: bool,
+    experimental_features: bool,
 }
 
 impl App {
@@ -240,6 +457,7 @@ impl App {
                         updated: String::new(),
                         status,
                         draft: false,
+                        workspace_id: None,
                         id,
                     });
                 }
@@ -303,11 +521,11 @@ impl App {
             }
         }).detach();
 
-        Self {
-            suite: s, workspaces, ws: 0, core, engine, env: Env::default(),
+        let mut app = Self {
+            suite: s, workspaces, ws: 0, workspace_items: Vec::new(), active_workspace_id: None, core, engine, env: Env::default(),
             tasks: Vec::new(), seen_at: HashMap::new(), selected: String::new(),
             timelines: HashMap::new(), replayed: HashSet::new(), composer, search, username_input,
-            allow_write: false, allow_shell: false, allow_web: false, ask_each: false,
+            permission_mode: PermissionMode::AskEveryTime,
             attention_only: false, right_open: true, search_open: false, settings_open: false,
             username: "User".to_string(),
             expanded: HashSet::new(), open_thoughts: HashSet::new(),
@@ -315,7 +533,16 @@ impl App {
             composer_restore: None, chat_cancel: None, rx, tx, busy: false,
             task_queue: Vec::new(), timeline_scroll: ScrollHandle::new(), follow_tail: Cell::new(true),
             _task,
-        }
+            model: load_settings().model.unwrap_or_else(|| "qwen36_35b".into()),
+            theme: load_settings().theme.unwrap_or_else(|| "dark".into()),
+            font_size: load_settings().font_size.unwrap_or(14.0),
+            auto_save: load_settings().auto_save.unwrap_or(true),
+            notifications: load_settings().notifications.unwrap_or(true),
+            debug_mode: load_settings().debug_mode.unwrap_or(false),
+            experimental_features: load_settings().experimental_features.unwrap_or(false),
+        };
+        app.load_workspaces();
+        app
     }
 
     fn workspace(&self) -> String {
@@ -531,10 +758,101 @@ impl App {
             updated: "now".into(),
             goal: String::new(),
             draft: true,
+            workspace_id: None,
+            workspace_id: None,
         });
         self.selected = id.clone();
         self.follow_tail.set(true);
         self.save_history();
+    }
+
+    fn cycle_model(&mut self) {
+        let models = ["qwen3_5_moe", "edge0_145b", "qwen36_35b"];
+        let current = models.iter().position(|m| m == &self.model.as_str()).unwrap_or(2);
+        let next = models[(current + 1) % models.len()];
+        self.model = next.to_string();
+        self.save_settings();
+    }
+
+    fn save_settings(&self) {
+        let settings = Settings {
+            model: Some(self.model.clone()),
+            theme: Some(self.theme.clone()),
+            font_size: Some(self.font_size),
+            auto_save: Some(self.auto_save),
+            notifications: Some(self.notifications),
+            debug_mode: Some(self.debug_mode),
+            experimental_features: Some(self.experimental_features),
+            ..Default::default()
+        };
+        save_settings(&settings);
+    }
+
+    fn add_workspace(&mut self, name: String, source_folders: Vec<String>, icon: String, color: String, indexed: bool) {
+        let mut ws = Workspace::new(name);
+        ws.source_folders = source_folders;
+        ws.icon = icon;
+        ws.color = color;
+        ws.indexed = indexed;
+        let id = ws.id.clone();
+        self.workspace_items.push(ws);
+        self.active_workspace_id = Some(id);
+        self.save_workspaces();
+    }
+
+    fn delete_workspace(&mut self, id: &str) {
+        self.workspace_items.retain(|w| w.id != id);
+        if self.active_workspace_id.as_deref() == Some(id) {
+            self.active_workspace_id = self.workspace_items.first().map(|w| w.id.clone());
+        }
+        self.save_workspaces();
+    }
+
+    fn select_workspace(&mut self, id: &str) {
+        self.active_workspace_id = Some(id.to_string());
+        self.save_workspaces();
+    }
+
+    fn save_workspaces(&self) {
+        let store = WorkspaceStore {
+            workspaces: self.workspace_items.clone(),
+            active_id: self.active_workspace_id.clone(),
+        };
+        let path = settings_path().parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")).join("workspaces.json");
+        if let Ok(json) = serde_json::to_string_pretty(&store) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    fn load_workspaces(&mut self) {
+        let path = settings_path().parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")).join("workspaces.json");
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(store) = serde_json::from_str::<WorkspaceStore>(&content) {
+                self.workspace_items = store.workspaces;
+                self.active_workspace_id = store.active_id;
+            }
+        }
+        if self.workspace_items.is_empty() {
+            self.add_workspace("Default".into(), vec![], "folder".into(), "orange".into(), true);
+        }
+    }
+
+    fn delete_task(&mut self, id: &str) {
+        self.tasks.retain(|t| t.id != id);
+        self.timelines.remove(id);
+        self.seen_at.remove(id);
+        self.replayed.remove(id);
+        if self.selected == id {
+            self.selected = self.tasks.first().map(|t| t.id.clone()).unwrap_or_default();
+        }
+        self.save_history();
+    }
+
+    fn rename_task(&mut self, id: &str, new_title: String) {
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
+            task.title = new_title;
+            self.save_history();
+        }
     }
 
     /// The whole life of a prompt queued behind a cold engine: send it when both
@@ -615,8 +933,13 @@ impl App {
                 return;
             }
             let workspace = self.workspace();
-            match self.core.start(&text, &workspace, self.allow_write, self.allow_shell,
-                                  self.allow_web, self.ask_each) {
+            let (allow_write, allow_shell, allow_web, ask_each) = match self.permission_mode {
+                PermissionMode::AskEveryTime => (false, false, false, true),
+                PermissionMode::AutoApprove => (true, true, true, false),
+                PermissionMode::FullAccess => (true, true, true, false),
+            };
+            match self.core.start(&text, &workspace, allow_write, allow_shell,
+                                  allow_web, ask_each) {
                 Ok(id) => {
                     let tl = self.tl(&id);
                     tl.messages.push(ChatMessage { role: Role::User, text: text.clone(), time: events::now_stamp() });
@@ -1370,18 +1693,12 @@ impl App {
     fn left(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let query = self.search.read(cx).value().trim().to_string();
-        let tasks = self.filtered_tasks(&query);
         let attention = self.attention_count();
-        let branch_display = if self.env.branch.is_empty() { "main".to_string() } else { self.env.branch.clone() };
 
-        let mut rail = div().w(px(250.0)).flex_shrink_0().bg(t.background).border_r_1().border_color(t.border)
-            .flex().flex_col().p_3().gap_3()
-            .child(div().p_3().rounded_md().border_1().border_color(t.border)
-                .child(Label::new("ACTIVE WORKSPACE").text_size(px(10.0)).text_color(t.muted_foreground))
-                .child(Label::new(self.workspace_name()).text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).truncate())
-                .child(Label::new(format!("{branch_display} · Local mode")).text_size(px(11.0)).text_color(t.muted_foreground)))
+        let mut rail = div().w(px(280.0)).flex_shrink_0().bg(t.background).border_r_1().border_color(t.border)
+            .flex().flex_col().p_3().gap_2()
+            // Top nav buttons
             .child(div().flex().flex_col().gap_1()
-                .child(self.nav_button("nav-coding", "Coding", !self.attention_only && !self.search_open, cx))
                 .child(self.nav_button("nav-new", "New Task", false, cx))
                 .child(Button::new("nav-attention").label(format!("My Attention{}", if attention > 0 { format!(" · {attention}") } else { String::new() })).ghost().small()
                     .when(self.attention_only, |b| b.bg(t.muted))
@@ -1389,40 +1706,102 @@ impl App {
                 .child(Button::new("nav-search").label("Search").ghost().small()
                     .when(self.search_open, |b| b.bg(t.muted))
                     .on_click(cx.listener(|a, _, _, cx| { a.search_open = !a.search_open; cx.notify(); }))));
-        // gpui-base inputs all render element id "input-state"; this id-bearing
-        // parent keeps their a11y node ids distinct when a UIA client connects.
+
+        // Search dock
         rail = rail.children(self.search_open.then(|| {
             div().id("search-dock").flex().flex_col().gap_1()
                 .child(Input::new(&self.search).h(px(28.0)).text_size(px(12.0)))
-                .child(Label::new(if query.is_empty() { String::new() } else { format!("{} tasks", tasks.len()) })
-                    .text_size(px(10.0)).text_color(t.muted_foreground))
         }));
-        rail = rail.child(div().flex().flex_col().gap_1().overflow_y_scrollbar().flex_1()
-            .child(Label::new("RECENT TASKS").text_size(px(10.0)).text_color(t.muted_foreground))
-            .children(tasks.iter().take(30).enumerate().map(|(idx, tk)| {
+
+        // Workspaces header with hover buttons
+        let workspaces_header = div().flex().items_center().justify_between().px_1().py_1()
+            .child(div().flex().items_center().gap_1()
+                .child(Label::new("Workspaces").text_size(px(12.0)).text_color(t.muted_foreground.clone()))
+                .child(Button::new("ws-info").label("ⓘ").ghost().small().w(px(16.0)).h(px(16.0))
+                    .on_click(cx.listener(|_a, _, window, cx| {
+                        window.push_notification(gpui_kit::component::notification::Notification::info(
+                            "Workspaces organize your projects. Each workspace has its own tasks."
+                        ), cx);
+                        cx.notify();
+                    }))))
+            .child(div().flex().items_center().gap_1()
+                .child(Button::new("ws-filter").label("☰").ghost().small().w(px(20.0)).h(px(20.0)))
+                .child(Button::new("ws-expand").label("⤢").ghost().small().w(px(20.0)).h(px(20.0)))
+                .child(Button::new("ws-add-header").label("+").ghost().small().w(px(20.0)).h(px(20.0))
+                    .on_click(cx.listener(|_a, _, _window, _cx| {
+                        // TODO: open new workspace dialog
+                    }))));
+        rail = rail.child(workspaces_header);
+
+        // Workspace list
+        rail = rail.child(div().flex().flex_col().gap_2().overflow_y_scrollbar().flex_1()
+            .children(self.workspace_items.iter().map(|ws| {
                 let t = t.clone();
-                let id = tk.id.clone();
-                let is_active = self.selected == tk.id;
-                div().id(ElementId::NamedInteger("task-item".into(), idx as u64))
-                    .p_2().rounded_md().cursor_pointer()
-                    .when(is_active, |d| d.bg(t.muted))
-                    .hover(|d| d.bg(t.muted))
-                    .on_click(cx.listener(move |a, _, _, cx| { a.selected = id.clone(); cx.notify(); }))
-                    .child(Label::new(tk.title.clone()).text_size(px(13.0)).font_weight(FontWeight::MEDIUM).truncate())
-                    .child(div().flex().items_center().gap_1().mt_1()
-                        .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(status_color(&t, tk.status)))
-                        .child(Label::new(tk.status.label()).text_size(px(11.0)).text_color(t.muted_foreground))
-                        .child(Label::new(if tk.draft { "· draft" } else { "· task" }).text_size(px(11.0)).text_color(t.muted_foreground))
-                        .child(Label::new(tk.updated.clone()).text_size(px(11.0)).text_color(t.muted_foreground).truncate()))
-            }))
-            .children(tasks.is_empty().then(|| Label::new(if query.is_empty() {
-                "Nothing here yet — the rail fills when a backend answers."
-            } else {
-                "No matching task."
-            }).text_size(px(11.5)).text_color(t.muted_foreground))))
-            .child(div().mt_auto().pt_3().border_t_1().border_color(t.border)
-                .child(Label::new(self.username_input.read(cx).value().to_string()).text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD))
-                .child(Label::new("Local account").text_size(px(11.0)).text_color(t.muted_foreground)));
+                let ws_id = ws.id.clone();
+                let ws_id2 = ws_id.clone();
+                let ws_id3 = ws_id.clone();
+                let ws_name = ws.name.clone();
+                let is_active = self.active_workspace_id.as_deref() == Some(&ws_id);
+                let ws_tasks: Vec<_> = self.tasks.iter()
+                    .filter(|task| task.workspace_id.as_deref() == Some(&ws_id))
+                    .cloned()
+                    .collect();
+
+                div().flex().flex_col().gap_1()
+                    .child(div().flex().items_center().justify_between()
+                        .child(Button::new(format!("ws-select-{}", ws.id)).label(format!("📁 {}", ws_name)).ghost().small().w_full().justify_start()
+                            .when(is_active, |b| b.bg(t.muted.clone()))
+                            .on_click(cx.listener(move |a, _, _, cx| {
+                                a.select_workspace(&ws_id);
+                                cx.notify();
+                            })))
+                        .child(div().flex().items_center().gap_1()
+                            .child(Button::new(format!("ws-new-task-{}", ws.id)).label("+").ghost().small().w(px(20.0)).h(px(20.0))
+                                .on_click(cx.listener(move |a, _, _, cx| {
+                                    a.select_workspace(&ws_id2);
+                                    a.new_draft();
+                                    cx.notify();
+                                })))
+                            .child(Button::new(format!("ws-delete-{}", ws.id)).label("×").ghost().small().w(px(20.0)).h(px(20.0))
+                                .on_click(cx.listener(move |a, _, _, cx| {
+                                    a.delete_workspace(&ws_id3);
+                                    cx.notify();
+                                })))))
+                    .children(ws_tasks.iter().map(|task| {
+                        let t = t.clone();
+                        let id = task.id.clone();
+                        let id_del = task.id.clone();
+                        let title = task.title.clone();
+                        let is_selected = self.selected == task.id;
+
+                        div().id(ElementId::Name(SharedString::from(format!("ws-task-{}", task.id))))
+                            .pl_4().pr_2().py_1().rounded_md().cursor_pointer()
+                            .when(is_selected, |d| d.bg(t.muted.clone()))
+                            .hover(|d| d.bg(t.muted.clone()))
+                            .on_click(cx.listener(move |a, _, _, cx| {
+                                a.selected = id.clone();
+                                cx.notify();
+                            }))
+                            .child(div().flex().items_center().justify_between()
+                                .child(Label::new(title).text_size(px(12.0)).truncate())
+                                .child(div().flex().items_center().gap_1()
+                                    .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(status_color(&t, task.status)))
+                                    .child(Button::new(format!("task-delete-{}", id_del)).label("×").ghost().small().w(px(16.0)).h(px(16.0))
+                                        .on_click(cx.listener(move |a, _, _, cx| {
+                                            a.delete_task(&id_del);
+                                            cx.notify();
+                                        })))))
+                    }))
+                    .children(ws_tasks.is_empty().then(|| {
+                        div().pl_4().py_1()
+                            .child(Label::new("No tasks yet").text_size(px(11.0)).text_color(t.muted_foreground.clone()))
+                    }))
+            })));
+
+        // User account at bottom
+        rail = rail.child(div().mt_auto().pt_2().border_t_1().border_color(t.border)
+            .child(Label::new(self.username_input.read(cx).value().to_string()).text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD))
+            .child(Label::new("Local account").text_size(px(11.0)).text_color(t.muted_foreground)));
         rail
     }
 
@@ -1466,6 +1845,8 @@ impl App {
                         .child(Button::new("stop").label("Stop").ghost().small()
                             .when(!busy, |b| b.disabled(true))
                             .on_click(cx.listener(|a, _, _, cx| { a.stop(); cx.notify(); })))
+                        .child(Button::new("compact").label("⊟").ghost().small()
+                            .on_click(cx.listener(|a, _, _, cx| { a.compact_selected(); cx.notify(); })))
                         .child(div().flex().items_center().gap_1().px_3().py_1().rounded_full().border_1().border_color(t.border)
                             .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(if busy { t.success } else { status_color(&t, status) }))
                             .child(Label::new(if busy { "Running" } else { status.label() }).text_size(px(12.0)))))
@@ -1493,7 +1874,7 @@ impl App {
     fn settings_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let active_tab: Rc<Cell<usize>> = Rc::new(Cell::new(0));
-        let tab_names = ["Connection", "Appearance", "Behavior", "Advanced"];
+        let tab_names = ["Connection", "Appearance", "Workspaces", "Behavior", "Advanced"];
 
         div().flex().flex_col().flex_1().overflow_hidden()
             .child(div().flex().items_center().justify_between().px_5().pt_4().pb_3().border_b_1().border_color(t.border.clone())
@@ -1541,66 +1922,183 @@ impl App {
                             ],
                             1 => vec![
                                 // Appearance section
-                                div().mb_4()
+                                div().mb_4().flex().flex_col().gap_3()
                                     .child(Label::new("Appearance").font_weight(FontWeight::BOLD).text_size(px(15.0)))
-                                    .child(div().mt_2()
+                                    .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(t.muted).border_1().border_color(t.border)
                                         .child(Label::new("Theme").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
-                                        .child(div().mt_1().child(Label::new("Dark").text_size(px(12.0)).text_color(t.muted_foreground.clone())))
-                                        .child(Label::new("Color theme. Changes apply immediately.")
-                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
-                                    )
-                                    .child(div().mt_3()
-                                        .child(Label::new("Font Size").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
-                                        .child(div().mt_1().child(Label::new("14px").text_size(px(12.0)).text_color(t.muted_foreground.clone())))
-                                        .child(Label::new("UI font size in pixels.")
+                                        .child(div().mt_1().gap_1().flex().flex_col()
+                                            .children(theme_presets().into_iter().enumerate().map(|(i, preset)| {
+                                                let preset_name = preset.name;
+                                                let preset_id = preset.id().to_string();
+                                                Button::new(format!("theme-{}", i))
+                                                    .label(preset_name)
+                                                    .ghost()
+                                                    .small()
+                                                    .w_full()
+                                                    .justify_start()
+                                                    .on_click(cx.listener(move |a, _, window, cx| {
+                                                        preset.apply(cx);
+                                                        a.theme = preset_id.clone();
+                                                        a.save_settings();
+                                                        window.refresh();
+                                                        cx.notify();
+                                                    }))
+                                            })))
+                                        .child(Label::new("Select a color theme. Changes apply immediately.")
                                             .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
                                     )
                                     .into_any_element(),
                             ],
                             2 => vec![
+                                // Workspaces section
+                                {
+                                    let workspaces = self.workspace_items.clone();
+                                    let active_id = self.active_workspace_id.clone();
+                                    div().mb_4().flex().flex_col().gap_3()
+                                        .child(Label::new("Workspaces").font_weight(FontWeight::BOLD).text_size(px(15.0)))
+                                        .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(t.muted).border_1().border_color(t.border)
+                                            .child(Label::new("Manage your workspaces").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                            .child(div().mt_2().flex().flex_col().gap_2()
+                                                .children(workspaces.iter().map(|ws| {
+                                                    let ws_id = ws.id.clone();
+                                                    let ws_id2 = ws_id.clone();
+                                                    let ws_name = ws.name.clone();
+                                                    let is_active = active_id.as_deref() == Some(&ws_id);
+                                                    div().flex().items_center().justify_between().p_2().rounded_md()
+                                                        .when(is_active, |d| d.bg(t.border.clone()))
+                                                        .child(div().flex().items_center().gap_2()
+                                                            .child(Label::new(ws_name.clone()).text_size(px(12.0)).font_weight(FontWeight::MEDIUM))
+                                                            .child(Label::new(format!("{} folders", ws.source_folders.len())).text_size(px(10.0)).text_color(t.muted_foreground.clone())))
+                                                        .child(div().flex().items_center().gap_1()
+                                                            .when(!is_active, |d| d.child(
+                                                                Button::new(format!("ws-select-{}", ws_id)).label("Activate").ghost().small()
+                                                                    .on_click(cx.listener(move |a, _, _, cx| {
+                                                                        a.select_workspace(&ws_id);
+                                                                        cx.notify();
+                                                                    }))
+                                                            ))
+                                                            .child(Button::new(format!("ws-delete-{}", ws_id2)).label("×").w(px(20.0)).h(px(20.0)).rounded_sm()
+                                                                .on_click(cx.listener(move |a, _, _, cx| {
+                                                                    a.delete_workspace(&ws_id2);
+                                                                    cx.notify();
+                                                                })))
+                                                        )
+                                                }))
+                                            )
+                                            .child(div().mt_3().flex().items_center().gap_2()
+                                                .child(Button::new("ws-add").label("+ Add Workspace").small()
+                                                    .on_click(cx.listener(|a, _, window, cx| {
+                                                        let name_input = cx.new(|cx| {
+                                                            let mut s = InputState::new(window, cx);
+                                                            s.set_value("New Workspace".to_string(), window, cx);
+                                                            s
+                                                        });
+                                                        let weak = cx.entity().downgrade();
+                                                        window.open_dialog(cx, move |dialog, _, _| {
+                                                            let name_input = name_input.clone();
+                                                            let weak = weak.clone();
+                                                            dialog.title("Add Workspace").content({
+                                                                let name_input = name_input.clone();
+                                                                let weak = weak.clone();
+                                                                move |content, _window, _cx| {
+                                                                    content.flex().flex_col().gap_3().w(px(320.0))
+                                                                        .child(Label::new("Workspace name:").text_size(px(12.0)))
+                                                                        .child(Input::new(&name_input).h(px(32.0)))
+                                                                        .child(div().flex().items_center().justify_end().gap_2()
+                                                                            .child(Button::new("ws-cancel").label("Cancel").ghost().small()
+                                                                                .on_click({
+                                                                                    move |_, window, cx| {
+                                                                                        window.close_dialog(cx);
+                                                                                    }
+                                                                                }))
+                                                                            .child(Button::new("ws-save").label("Add").small()
+                                                                                .on_click({
+                                                                                    let name_input = name_input.clone();
+                                                                                    let weak = weak.clone();
+                                                                                    move |_, window, cx| {
+                                                                                        if let Some(app) = weak.upgrade() {
+                                                                                            let name = name_input.read(cx).value().trim().to_string();
+                                                                                            if !name.is_empty() {
+                                                                                                app.update(cx, |a, cx| {
+                                                                                                    a.add_workspace(name, vec![], "folder".into(), "orange".into(), true);
+                                                                                                    cx.notify();
+                                                                                                });
+                                                                                            }
+                                                                                        }
+                                                                                        window.close_dialog(cx);
+                                                                                    }
+                                                                                }))
+                                                                        )
+                                                                }
+                                                            })
+                                                        });
+                                                        cx.notify();
+                                                    })))
+                                            )
+                                            .child(Label::new("Workspaces organize your projects. Activate a workspace to switch context.")
+                                                .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_2())
+                                        )
+                                        .into_any_element()
+                                },
+                            ],
+                            3 => vec![
                                 // Behavior section
-                                div().mb_4()
+                                div().mb_4().flex().flex_col().gap_3()
                                     .child(Label::new("Behavior").font_weight(FontWeight::BOLD).text_size(px(15.0)))
-                                    .child(div().mt_2()
-                                        .child(Label::new("Auto-save").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
-                                        .child(div().mt_1().text_size(px(12.0)).child("✓ Enabled"))
+                                    .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(t.muted).border_1().border_color(t.border)
+                                        .child(div().flex().items_center().justify_between()
+                                            .child(Label::new("Auto-save").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                            .child(Label::new(if self.auto_save { "✓ Enabled" } else { "✗ Disabled" })
+                                                .text_size(px(11.0)).text_color(if self.auto_save { t.green } else { t.muted_foreground })))
                                         .child(Label::new("Automatically save task history and settings.")
-                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
+                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()))
                                     )
-                                    .child(div().mt_3()
-                                        .child(Label::new("Notifications").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
-                                        .child(div().mt_1().text_size(px(12.0)).child("✓ Enabled"))
+                                    .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(t.muted).border_1().border_color(t.border)
+                                        .child(div().flex().items_center().justify_between()
+                                            .child(Label::new("Notifications").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                            .child(Label::new(if self.notifications { "✓ Enabled" } else { "✗ Disabled" })
+                                                .text_size(px(11.0)).text_color(if self.notifications { t.green } else { t.muted_foreground })))
                                         .child(Label::new("Show desktop notifications for task completion.")
-                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
+                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()))
                                     )
-                                    .child(div().mt_3()
+                                    .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(t.muted).border_1().border_color(t.border)
                                         .child(Label::new("Clear History").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
                                         .child(Button::new("clear-history-btn").label("Clear all task history").ghost().small().mt_1()
-                                            .on_click(cx.listener(|_, _, window, cx| {
+                                            .on_click(cx.listener(|a, _, window, cx| {
+                                                a.tasks.clear();
+                                                a.timelines.clear();
+                                                a.seen_at.clear();
+                                                a.selected.clear();
+                                                a.save_history();
                                                 window.push_notification(gpui_kit::component::notification::Notification::info("History cleared."), cx);
+                                                cx.notify();
                                             })))
                                         .child(Label::new("Remove all tasks and conversations.")
                                             .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
                                     )
                                     .into_any_element(),
                             ],
-                            3 => vec![
+                            4 => vec![
                                 // Advanced section
-                                div().mb_4()
+                                div().mb_4().flex().flex_col().gap_3()
                                     .child(Label::new("Advanced").font_weight(FontWeight::BOLD).text_size(px(15.0)))
-                                    .child(div().mt_2()
-                                        .child(Label::new("Debug Mode").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
-                                        .child(div().mt_1().text_size(px(12.0)).child("✗ Disabled"))
+                                    .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(t.muted).border_1().border_color(t.border)
+                                        .child(div().flex().items_center().justify_between()
+                                            .child(Label::new("Debug Mode").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                            .child(Label::new(if self.debug_mode { "✓ Enabled" } else { "✗ Disabled" })
+                                                .text_size(px(11.0)).text_color(if self.debug_mode { t.green } else { t.muted_foreground })))
                                         .child(Label::new("Enable verbose logging and debug information.")
-                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
+                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()))
                                     )
-                                    .child(div().mt_3()
-                                        .child(Label::new("Experimental Features").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
-                                        .child(div().mt_1().text_size(px(12.0)).child("✗ Disabled"))
+                                    .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(t.muted).border_1().border_color(t.border)
+                                        .child(div().flex().items_center().justify_between()
+                                            .child(Label::new("Experimental Features").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
+                                            .child(Label::new(if self.experimental_features { "✓ Enabled" } else { "✗ Disabled" })
+                                                .text_size(px(11.0)).text_color(if self.experimental_features { t.green } else { t.muted_foreground })))
                                         .child(Label::new("Enable unstable features.")
-                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1())
+                                            .text_size(px(11.0)).text_color(t.muted_foreground.clone()))
                                     )
-                                    .child(div().mt_3()
+                                    .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(t.muted).border_1().border_color(t.border)
                                         .child(Label::new("Version").font_weight(FontWeight::MEDIUM).text_size(px(12.0)))
                                         .child(Label::new("1.0.0").text_size(px(11.0)).text_color(t.muted_foreground.clone()).mt_1().font_family("monospace"))
                                     )
@@ -1906,29 +2404,43 @@ impl App {
             .child(div().id("composer-dock").rounded_md().border_1().border_color(t.border).p_3()
                 .child(Input::new(&self.composer)))
             .child(div().flex().items_center().justify_between()
-                .child(div().flex().items_center().gap_2()
-                    .child(Button::new("composer-plus").label("+").ghost().small())
+                .child(div().flex().items_center().gap_1()
+                    .child(self.permission_button(cx))
+                    .child(div().w(px(1.0)).h(px(16.0)).bg(t.border).mx_1())
+                    .child(Button::new("composer-plus").label("+").ghost().small()
+                        .on_click(cx.listener(|a, _, window, cx| {
+                            // Open attachment/feature menu
+                            window.push_notification(gpui_kit::component::notification::Notification::info("Attachment menu coming soon."), cx);
+                            cx.notify();
+                        })))
                     .child(Button::new("composer-attach").label("📎").ghost().small())
                     .child(Button::new("composer-mic").label("🎤").ghost().small())
                     .child(Label::new("Hold to dictate").text_size(px(11.0)).text_color(t.muted_foreground)))
-                .child(Button::new("send").label("↑").primary().small()
-                    .when(!send_enabled, |b| b.disabled(true))
-                    .on_click(cx.listener(|a, _, window, cx| { a.send(window, cx); }))));
+                .child(div().flex().items_center().gap_2()
+                    .child(Button::new("model-select").label(format!("⚡ {}", self.model)).ghost().small()
+                        .on_click(cx.listener(|a, _, _, cx| { a.cycle_model(); cx.notify(); })))
+                    .child(Button::new("send").label("↑").primary().small()
+                        .when(!send_enabled, |b| b.disabled(true))
+                        .on_click(cx.listener(|a, _, window, cx| { a.send(window, cx); })))));
         col
     }
 
-    fn toggle(&self, id: &'static str, label: &'static str, on: bool, cx: &mut Context<Self>) -> Button {
+    fn permission_button(&self, cx: &mut Context<Self>) -> Button {
         let t = cx.theme().clone();
-        Button::new(id).label(label).ghost().small()
-            .when(on, |b| b.bg(t.muted))
-            .on_click(cx.listener(move |a, _, _, cx| {
-                match label {
-                    "edits" => a.allow_write = !a.allow_write,
-                    "commands" => a.allow_shell = !a.allow_shell,
-                    "web" => a.allow_web = !a.allow_web,
-                    "ask each" => a.ask_each = !a.ask_each,
-                    _ => {}
-                }
+        let mode = self.permission_mode.clone();
+        let icon = mode.icon();
+        let label = mode.label();
+        Button::new("permission-mode").label(format!("{} {}", icon, label)).ghost().small()
+            .on_click(cx.listener(move |a, _, window, cx| {
+                // Cycle through permission modes
+                a.permission_mode = match a.permission_mode {
+                    PermissionMode::AskEveryTime => PermissionMode::AutoApprove,
+                    PermissionMode::AutoApprove => PermissionMode::FullAccess,
+                    PermissionMode::FullAccess => PermissionMode::AskEveryTime,
+                };
+                window.push_notification(gpui_kit::component::notification::Notification::info(
+                    format!("Permission: {}", a.permission_mode.label())
+                ), cx);
                 cx.notify();
             }))
     }
@@ -2139,7 +2651,10 @@ fn main() {
     }));
     application().with_assets(assets::Assets).run(|cx| {
         init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
+        let saved = load_settings();
+        let theme_id = saved.theme.as_deref().unwrap_or("dark");
+        let idx = find_preset_index(theme_id);
+        theme_presets()[idx].apply(cx);
         let bounds = Bounds::centered(None, size(px(1500.0), px(960.0)), cx);
         cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: Some(TitlebarOptions { title: Some("Fennec".into()), ..Default::default() }), ..Default::default() }, |window, cx| {
             let composer = cx.new(|cx| InputState::new(window, cx));
