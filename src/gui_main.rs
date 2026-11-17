@@ -151,7 +151,9 @@ fn settings_path() -> PathBuf {
     let dir = std::env::current_exe().ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
-    dir.join("gui_settings.json")
+    let fennec_dir = dir.join(".fennec");
+    let _ = std::fs::create_dir_all(&fennec_dir);
+    fennec_dir.join("gui_settings.json")
 }
 
 fn load_settings() -> Settings {
@@ -185,6 +187,7 @@ struct HistoryTask {
     updated: String,
     goal: String,
     draft: bool,
+    workspace_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -759,7 +762,6 @@ impl App {
             goal: String::new(),
             draft: true,
             workspace_id: None,
-            workspace_id: None,
         });
         self.selected = id.clone();
         self.follow_tail.set(true);
@@ -947,7 +949,7 @@ impl App {
                     tl.streaming = true;
                     self.tasks.insert(0, Task {
                         id: id.clone(), title: truncate(&text, 58), status: TaskStatus::Running,
-                        updated: "now".into(), goal: text, draft: false,
+                        updated: "now".into(), goal: text, draft: false, workspace_id: None,
                     });
                     self.selected = id.clone();
                     self.follow_tail.set(true);
@@ -972,7 +974,7 @@ impl App {
                 let id = format!("draft-{}", millis());
                 self.tasks.insert(0, Task {
                     id: id.clone(), title: "New task".into(), status: TaskStatus::Waiting,
-                    updated: "now".into(), goal: String::new(), draft: true,
+                    updated: "now".into(), goal: String::new(), draft: true, workspace_id: None,
                 });
                 self.selected = id.clone();
                 self.follow_tail.set(true);
@@ -1020,7 +1022,7 @@ impl App {
             let id = format!("draft-{}", millis());
             self.tasks.insert(0, Task {
                 id: id.clone(), title: "New task".into(), status: TaskStatus::Waiting,
-                updated: "now".into(), goal: String::new(), draft: true,
+                updated: "now".into(), goal: String::new(), draft: true, workspace_id: None,
             });
             self.selected = id.clone();
             self.follow_tail.set(true);
@@ -1092,15 +1094,12 @@ impl App {
     /// ~/.local/share on Linux, ~/Library/Application Support on macOS. The
     /// egui binary writes the same file, so the two shells share one history.
     fn history_path() -> Option<PathBuf> {
-        let base = if cfg!(target_os = "windows") {
-            std::env::var("LOCALAPPDATA").ok().map(PathBuf::from)
-        } else if cfg!(target_os = "macos") {
-            std::env::var("HOME").ok().map(|h| PathBuf::from(h).join("Library/Application Support"))
-        } else {
-            std::env::var("XDG_DATA_HOME").ok().map(PathBuf::from)
-                .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/share")))
-        }?;
-        Some(base.join("fennec-desktop").join("history.json"))
+        let dir = std::env::current_exe().ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let fennec_dir = dir.join(".fennec");
+        let _ = std::fs::create_dir_all(&fennec_dir);
+        Some(fennec_dir.join("history.json"))
     }
 
     fn save_history(&self) {
@@ -1122,6 +1121,7 @@ impl App {
                 updated: t.updated.clone(),
                 goal: t.goal.clone(),
                 draft: t.draft,
+                workspace_id: t.workspace_id.clone(),
             }).collect(),
             // Only timelines that belong to a task row; a stale key with no
             // task (like the corrupt "" entry) would re-serialize forever.
@@ -1175,6 +1175,7 @@ impl App {
             updated: t.updated,
             goal: t.goal,
             draft: t.draft,
+            workspace_id: t.workspace_id,
         }).collect();
         for (id, htl) in data.timelines {
             let mut tl = Timeline::default();
@@ -1830,7 +1831,7 @@ impl App {
             .map(|t| t.title.clone()).unwrap_or_else(|| "No task selected".into());
         let busy = self.busy;
         let status = self.tl_status(&self.selected);
-        let show_queue = self.busy && !self.task_queue.is_empty();
+        let show_queue = !self.task_queue.is_empty();
 
         let mut col = div().flex().flex_col().flex_1().overflow_hidden()
             // Header: workspace · branch, title, status pill.
@@ -2366,23 +2367,39 @@ impl App {
     fn queue(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let len = self.task_queue.len();
-        let mut col = div().border_t_1().border_color(t.border).bg(t.background).px_5().py_2().flex().flex_col().gap_1()
-            .child(div().flex().items_center().justify_between()
-                .child(div().flex().items_center().gap_2()
-                    .child(Label::new("☰").text_size(px(14.0)).text_color(t.muted_foreground))
-                    .child(Label::new(format!("Task queue")).font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
-                    .child(Label::new(format!("{len} item{}", if len == 1 { "" } else { "s" })).text_size(px(11.0)).text_color(t.muted_foreground)))
-                .child(Label::new("View all").text_size(px(11.0)).text_color(t.primary)));
-        for (i, task) in self.task_queue.iter().enumerate() {
-            let is_next = i == 0;
-            col = col.child(div().id(ElementId::NamedInteger("queue-item".into(), i as u64)).flex().items_center().justify_between().py_1()
-                .child(div().flex().items_center().gap_2()
-                    .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(if is_next { t.success } else { t.muted_foreground }))
-                    .child(Label::new(truncate(&task.text, 80)).text_size(px(12.0)).truncate()))
-                .child(Label::new(if is_next { "Next" } else { "Queued" }).font_weight(FontWeight::SEMIBOLD).text_size(px(10.5))
-                    .text_color(if is_next { t.success } else { t.muted_foreground })));
+        if len == 0 {
+            return div().into_any_element();
         }
-        col
+
+        let header = div().flex().items_center().justify_between().px_4().py_2()
+            .child(div().flex().items_center().gap_2()
+                .child(Label::new("☰").text_size(px(14.0)).text_color(t.muted_foreground))
+                .child(Label::new("Task queue").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
+                .child(Label::new(format!("{len} item{}", if len == 1 { "" } else { "s" })).text_size(px(11.0)).text_color(t.muted_foreground)))
+            .child(Button::new("queue-view-all").label("View all").ghost().xsmall()
+                .on_click(cx.listener(|a, _, window, cx| {
+                    window.push_notification(gpui_kit::component::notification::Notification::info(
+                        format!("{} tasks in queue", a.task_queue.len())
+                    ), cx);
+                    cx.notify();
+                })));
+
+        let items = div().flex().flex_col().gap_0().overflow_y_scrollbar().max_h(px(120.0))
+            .children(self.task_queue.iter().enumerate().map(|(i, task)| {
+                let is_next = i == 0;
+                div().id(ElementId::NamedInteger("queue-item".into(), i as u64))
+                    .flex().items_center().justify_between().px_4().py_1_5()
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(if is_next { t.success } else { t.muted_foreground }))
+                        .child(Label::new(truncate(&task.text, 80)).text_size(px(12.0)).truncate()))
+                    .child(Label::new(if is_next { "Next" } else { "Queued" }).font_weight(FontWeight::SEMIBOLD).text_size(px(10.5))
+                        .text_color(if is_next { t.success } else { t.muted_foreground }))
+            }));
+
+        div().border_t_1().border_color(t.border).bg(t.background).flex().flex_col()
+            .child(header)
+            .child(items)
+            .into_any_element()
     }
 
     fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
