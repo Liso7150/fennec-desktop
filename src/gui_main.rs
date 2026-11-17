@@ -1437,7 +1437,7 @@ impl App {
             .map(|t| t.title.clone()).unwrap_or_else(|| "No task selected".into());
         let busy = self.busy;
         let status = self.tl_status(&self.selected);
-        let show_queue = self.is_working() && !self.task_queue.is_empty();
+        let show_queue = !self.task_queue.is_empty();
 
         let mut col = div().flex().flex_col().flex_1().overflow_hidden()
             // Header: workspace · branch, status pill, Stop.
@@ -1734,21 +1734,20 @@ impl App {
         let t = cx.theme().clone();
         let len = self.task_queue.len();
         let mut col = div().border_t_1().border_color(t.border).bg(t.background).px_5().py_2().flex().flex_col().gap_1()
-            .child(div().flex().items_center().gap_2()
-                .child(Label::new("☰").text_size(px(14.0)).text_color(t.muted_foreground))
-                .child(Label::new(format!("{} item{}", len, if len == 1 { "" } else { "s" })).font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
-                .child(Label::new("will start when the current task finishes").text_size(px(11.0)).text_color(t.muted_foreground)));
+            .child(div().flex().items_center().justify_between()
+                .child(div().flex().items_center().gap_2()
+                    .child(Label::new("☰").text_size(px(14.0)).text_color(t.muted_foreground))
+                    .child(Label::new(format!("Task queue")).font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
+                    .child(Label::new(format!("{len} item{}", if len == 1 { "" } else { "s" })).text_size(px(11.0)).text_color(t.muted_foreground)))
+                .child(Label::new("View all").text_size(px(11.0)).text_color(t.primary)));
         for (i, task) in self.task_queue.iter().enumerate() {
+            let is_next = i == 0;
             col = col.child(div().id(ElementId::NamedInteger("queue-item".into(), i as u64)).flex().items_center().justify_between().py_1()
                 .child(div().flex().items_center().gap_2()
-                    .child(Label::new(if i == 0 { "Next" } else { "Queued" }).font_weight(FontWeight::SEMIBOLD).text_size(px(10.5))
-                        .text_color(if i == 0 { t.yellow } else { t.muted_foreground }))
-                    .child(Label::new(truncate(&task.text, 60)).text_size(px(11.5)).truncate()))
-                .child({
-                    let idx = i;
-                    Button::new(ElementId::NamedInteger("queue-rm".into(), i as u64)).label("×").ghost().xsmall()
-                        .on_click(cx.listener(move |a, _, _, cx| { a.remove_from_queue(idx); cx.notify(); }))
-                }));
+                    .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(if is_next { t.success } else { t.muted_foreground }))
+                    .child(Label::new(truncate(&task.text, 80)).text_size(px(12.0)).truncate()))
+                .child(Label::new(if is_next { "Next" } else { "Queued" }).font_weight(FontWeight::SEMIBOLD).text_size(px(10.5))
+                    .text_color(if is_next { t.success } else { t.muted_foreground })));
         }
         col
     }
