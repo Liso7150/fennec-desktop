@@ -148,6 +148,7 @@ struct App {
     replayed: HashSet<String>,
     composer: Entity<InputState>,
     search: Entity<InputState>,
+    username_input: Entity<InputState>,
     allow_write: bool,
     allow_shell: bool,
     allow_web: bool,
@@ -159,6 +160,7 @@ struct App {
     right_open: bool,
     search_open: bool,
     settings_open: bool,
+    username: String,
     expanded: HashSet<String>,
     /// Thought/reasoning rows the user has opened; collapsed is the default.
     open_thoughts: HashSet<String>,
@@ -188,6 +190,7 @@ impl App {
     fn new(
         composer: Entity<InputState>,
         search: Entity<InputState>,
+        username_input: Entity<InputState>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -302,9 +305,10 @@ impl App {
         Self {
             suite: s, workspaces, ws: 0, core, engine, env: Env::default(),
             tasks: Vec::new(), seen_at: HashMap::new(), selected: String::new(),
-            timelines: HashMap::new(), replayed: HashSet::new(), composer, search,
+            timelines: HashMap::new(), replayed: HashSet::new(), composer, search, username_input,
             allow_write: false, allow_shell: false, allow_web: false, ask_each: false,
             attention_only: false, right_open: true, search_open: false, settings_open: false,
+            username: "User".to_string(),
             expanded: HashSet::new(), open_thoughts: HashSet::new(),
             toasts: Vec::new(), line: String::new(), pending_send: None,
             composer_restore: None, chat_cancel: None, rx, tx, busy: false,
@@ -1414,7 +1418,7 @@ impl App {
             }).text_size(px(11.5)).text_color(t.muted_foreground))))
             .child(div().mt_auto().pt_3().border_t_1().border_color(t.border).flex().items_center().justify_between()
                 .child(div().flex().flex_col()
-                    .child(Label::new("Liso7150").text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD))
+                    .child(Label::new(self.username_input.read(cx).value().to_string()).text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD))
                     .child(Label::new("Local account").text_size(px(11.0)).text_color(t.muted_foreground)))
                 .child(Button::new("nav-settings").label("⚙").ghost().small()
                     .on_click(cx.listener(|a, _, _, cx| { a.settings_open = !a.settings_open; cx.notify(); }))));
@@ -1508,7 +1512,7 @@ impl App {
                     .child(div().p_3().rounded_md().border_1().border_color(t.border)
                         .child(div().flex().flex_col().gap_1()
                             .child(Label::new("Username").text_size(px(11.0)).text_color(t.muted_foreground))
-                            .child(Label::new("Liso7150").text_size(px(13.0)).font_weight(FontWeight::MEDIUM))))
+                            .child(Input::new(&self.username_input).text_size(px(13.0)))))
                     .child(div().p_3().rounded_md().border_1().border_color(t.border)
                         .child(div().flex().flex_col().gap_1()
                             .child(Label::new("Account type").text_size(px(11.0)).text_color(t.muted_foreground))
@@ -2083,12 +2087,15 @@ fn main() {
         cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: Some(TitlebarOptions { title: Some("Fennec".into()), ..Default::default() }), ..Default::default() }, |window, cx| {
             let composer = cx.new(|cx| InputState::new(window, cx));
             let search = cx.new(|cx| InputState::new(window, cx));
+            let username_input = cx.new(|cx| InputState::new(window, cx));
             let view = cx.new(|cx| {
-                let mut app = App::new(composer, search, window, cx);
+                let mut app = App::new(composer, search, username_input.clone(), window, cx);
                 app.load_history();
                 if app.selected.is_empty() {
                     app.selected = app.tasks.first().map(|t| t.id.clone()).unwrap_or_default();
                 }
+                // Set initial username in the input
+                username_input.update(cx, |state, cx| state.set_value("User".to_string(), window, cx));
                 app
             });
             cx.new(|cx| Root::new(view, window, cx))
