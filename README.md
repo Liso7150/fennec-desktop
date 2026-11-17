@@ -1,4 +1,4 @@
-![Fennec Desktop 2.0.0 — a local-first coding agent as a native Rust app (egui), talking to the local Fennec inference engine. Nothing is hosted. No Electron, no Node, no web view. Windows macOS Linux, MIT license.](docs/hero.png)
+![Fennec Desktop 1.0.0 — a local-first coding agent as a native Rust app (egui), talking to the local Fennec inference engine. Nothing is hosted. No Electron, no Node, no web view. Windows macOS Linux, MIT license.](docs/hero.png)
 
 Fennec is a native Rust desktop app (egui/eframe) for the suite. The model, the agent loop,
 the tools and the workspace discovery all run on this device; nothing is hosted, no account,

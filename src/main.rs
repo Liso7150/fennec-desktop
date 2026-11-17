@@ -704,7 +704,7 @@ impl App {
         }
         let id = if self.selected.is_empty() { self.new_draft() } else { self.selected.clone() };
         self.tl(&id).messages.push(ChatMessage { role: Role::User, text, time: events::now_stamp() });
-        self.line = "No backend reachable — start the engine (`fennec serve`) or the agent server (`fennec-agent serve`).".to_string();
+        self.line = "No backend reachable — start the engine (`fennec serve --auto-tier`) or the agent server (`fennec-agent serve`).".to_string();
     }
 
     /// Hand one answer to the service off the UI thread, then report what it
@@ -1309,7 +1309,7 @@ impl App {
             let note = if engine_up {
                 "Agent loop offline — direct chat mode: tokens stream from the engine; the tool timeline is unavailable."
             } else {
-                "No backend reachable — run `fennec serve` (engine) or `fennec-agent serve` (agent loop)."
+                "No backend reachable — run `fennec serve --auto-tier` (engine) or `fennec-agent serve` (agent loop)."
             };
             egui::Frame::default().fill(HOVER).corner_radius(RADIUS).inner_margin(8.0).show(ui, |ui| {
                 ui.label(egui::RichText::new(note).size(12.0).color(WARN));
