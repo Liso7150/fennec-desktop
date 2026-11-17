@@ -1344,22 +1344,25 @@ impl Render for App {
 impl App {
     fn topbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
-        let (label, color) = match (self.env.core_up, self.env.engine_up) {
-            (true, true) => ("agent loop · engine", t.success),
-            (true, false) => ("agent loop · engine offline", t.yellow),
-            (false, true) => ("direct chat · engine", t.yellow),
-            (false, false) => ("no backend", t.red),
-        };
+        let (core_up, engine_up) = (self.env.core_up, self.env.engine_up);
+        let connected = core_up && engine_up;
+        let status_label = if connected { "Backend connected" } else if core_up { "Agent loop only" } else if engine_up { "Engine only" } else { "No backend" };
+        let status_color = if connected { t.success } else { t.yellow };
+        let user = self.username_input.read(cx).value().to_string();
+
         div().flex().items_center().justify_between().px_4().py_2().bg(t.background).border_b_1().border_color(t.border)
             .child(div().flex().items_center().gap_3()
-                .child(Label::new("Fennec").text_size(px(16.0)).font_weight(FontWeight::BOLD))
-                .child(Label::new("local coding agent").text_size(px(13.0)).text_color(t.muted_foreground)))
+                .child(Label::new(">_").font_family("monospace").text_size(px(16.0)).text_color(t.primary))
+                .child(div().flex().flex_col()
+                    .child(Label::new("Fennec").text_size(px(16.0)).font_weight(FontWeight::BOLD))
+                    .child(Label::new(format!("{user} / local-first workspace")).text_size(px(11.0)).text_color(t.muted_foreground))))
             .child(div().flex().items_center().gap_3()
                 .child(div().flex().items_center().gap_1()
-                    .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(color))
-                    .child(Label::new(label).text_size(px(12.0)).text_color(color))
-                    .child(Label::new("· local mode").text_size(px(12.0)).text_color(t.muted_foreground)))
-                .child(Button::new("inspector").label(if self.right_open { "»" } else { "«" }).ghost().xsmall()
+                    .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(status_color))
+                    .child(Label::new(status_label).text_size(px(12.0)).text_color(status_color)))
+                .child(Button::new("topbar-settings").label("⚙").ghost().small()
+                    .on_click(cx.listener(|a, _, _, cx| { a.settings_open = !a.settings_open; cx.notify(); })))
+                .child(Button::new("inspector").label(if self.right_open { "◫" } else { "◰" }).ghost().small()
                     .on_click(cx.listener(|a, _, _, cx| { a.right_open = !a.right_open; cx.notify(); }))))
     }
 
@@ -1416,12 +1419,9 @@ impl App {
             } else {
                 "No matching task."
             }).text_size(px(11.5)).text_color(t.muted_foreground))))
-            .child(div().mt_auto().pt_3().border_t_1().border_color(t.border).flex().items_center().justify_between()
-                .child(div().flex().flex_col()
-                    .child(Label::new(self.username_input.read(cx).value().to_string()).text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD))
-                    .child(Label::new("Local account").text_size(px(11.0)).text_color(t.muted_foreground)))
-                .child(Button::new("nav-settings").label("⚙").ghost().small()
-                    .on_click(cx.listener(|a, _, _, cx| { a.settings_open = !a.settings_open; cx.notify(); }))));
+            .child(div().mt_auto().pt_3().border_t_1().border_color(t.border)
+                .child(Label::new(self.username_input.read(cx).value().to_string()).text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD))
+                .child(Label::new("Local account").text_size(px(11.0)).text_color(t.muted_foreground)));
         rail
     }
 
@@ -1450,10 +1450,10 @@ impl App {
             .map(|t| t.title.clone()).unwrap_or_else(|| "No task selected".into());
         let busy = self.busy;
         let status = self.tl_status(&self.selected);
-        let show_queue = !self.task_queue.is_empty();
+        let show_queue = self.busy && !self.task_queue.is_empty();
 
         let mut col = div().flex().flex_col().flex_1().overflow_hidden()
-            // Header: workspace · branch, status pill, Stop.
+            // Header: workspace · branch, title, status pill.
             .child(div().flex().items_start().justify_between().px_5().pt_4().pb_3().border_b_1().border_color(t.border)
                 .child(div().flex().flex_col().gap_1()
                     .child(Label::new(format!("{ws} · {branch_display}")).font_family("monospace").text_size(px(11.0)).text_color(t.muted_foreground))
@@ -1466,7 +1466,7 @@ impl App {
                             .when(!busy, |b| b.disabled(true))
                             .on_click(cx.listener(|a, _, _, cx| { a.stop(); cx.notify(); })))
                         .child(div().flex().items_center().gap_1().px_3().py_1().rounded_full().border_1().border_color(t.border)
-                            .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(if busy { t.primary } else { status_color(&t, status) }))
+                            .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(if busy { t.success } else { status_color(&t, status) }))
                             .child(Label::new(if busy { "Running" } else { status.label() }).text_size(px(12.0)))))
                     .children((!model.is_empty()).then(|| {
                         Label::new(model.clone()).font_family("monospace").text_size(px(11.0)).text_color(t.muted_foreground)
@@ -1811,11 +1811,9 @@ impl App {
         let t = cx.theme().clone();
         let value = self.composer.read(cx).value().trim().to_string();
         let send_enabled = !value.is_empty();
-        let (core_up, engine_up, model) = (self.env.core_up, self.env.engine_up, self.env.model.clone());
 
         let mut col = div().border_t_1().border_color(t.border).bg(t.background).px_5().py_3().flex().flex_col().gap_2();
-        // Status line and toasts sit right above the input: feedback about
-        // sending, queueing and the backends is read where the user is typing.
+        // Toasts sit right above the input.
         for (ti, toast) in self.toasts.iter().enumerate() {
             col = col.child(div().id(ElementId::NamedInteger("toast".into(), ti as u64)).flex().items_center().gap_2()
                 .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(if toast.good { t.success } else { t.yellow }))
@@ -1824,40 +1822,19 @@ impl App {
         if !self.line.is_empty() {
             col = col.child(Label::new(self.line.clone()).text_size(px(12.0)).text_color(t.yellow));
         }
-        // gpui-base inputs all render element id "input-state"; this id-bearing
-        // parent keeps their a11y node ids distinct when a UIA client connects.
         col = col
             .child(div().id("composer-dock").rounded_md().border_1().border_color(t.border).p_3()
                 .child(Input::new(&self.composer)))
             .child(div().flex().items_center().justify_between()
                 .child(div().flex().items_center().gap_2()
-                    .child(self.toggle("allow-write", "edits", self.allow_write, cx))
-                    .child(self.toggle("allow-shell", "commands", self.allow_shell, cx))
-                    .child(self.toggle("allow-web", "web", self.allow_web, cx))
-                    .child(self.toggle("ask-each", "ask each", self.ask_each, cx))
-                    .children((core_up && self.ask_each).then(|| {
-                        // With an approver attached the service lifts the flags,
-                        // so the three switches above stop meaning "yes" and the
-                        // answer on each card decides. Saying so is what keeps
-                        // the row honest.
-                        Label::new("each gated call is put to you first").text_size(px(10.5)).text_color(t.yellow)
-                    }))
-                    .children((!core_up).then(|| {
-                        Label::new("jail switches apply to the agent loop").text_size(px(10.5)).text_color(t.muted_foreground)
-                    })))
-                .child(div().flex().items_center().gap_3()
-                    .children((!model.is_empty()).then(|| {
-                        Label::new(model.clone()).font_family("monospace").text_size(px(11.0)).text_color(t.muted_foreground)
-                    }))
-                    .child(Button::new("send").label("Send").primary().small()
-                        .when(!send_enabled, |b| b.disabled(true))
-                        .on_click(cx.listener(|a, _, window, cx| { a.send(window, cx); })))));
-        col.child(div().flex().items_center().gap_2()
-            .child(Label::new(UNAVAILABLE_NOTE).text_size(px(10.5)).text_color(t.muted_foreground))
-            .children((core_up && !engine_up).then(|| {
-                Label::new(format!("The engine is offline — the first send starts it and the prompt waits for the model to answer ({MOD_HINT}+Enter sends)."))
-                    .text_size(px(10.5)).text_color(t.muted_foreground)
-            })))
+                    .child(Button::new("composer-plus").label("+").ghost().small())
+                    .child(Button::new("composer-attach").label("📎").ghost().small())
+                    .child(Button::new("composer-mic").label("🎤").ghost().small())
+                    .child(Label::new("Hold to dictate").text_size(px(11.0)).text_color(t.muted_foreground)))
+                .child(Button::new("send").label("↑").primary().small()
+                    .when(!send_enabled, |b| b.disabled(true))
+                    .on_click(cx.listener(|a, _, window, cx| { a.send(window, cx); }))));
+        col
     }
 
     fn toggle(&self, id: &'static str, label: &'static str, on: bool, cx: &mut Context<Self>) -> Button {
