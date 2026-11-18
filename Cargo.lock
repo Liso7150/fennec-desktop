@@ -2163,6 +2163,9 @@ name = "fennec-ui"
 version = "1.0.0"
 dependencies = [
  "gpui-kit",
+ "hound",
+ "reqwest",
+ "serde_json",
 ]
 
 [[package]]

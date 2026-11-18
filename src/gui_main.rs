@@ -14,7 +14,7 @@ use fennec_client::{git, suite, Core, Outlet};
 use fennec_desktop::events::{self, ApprovalState, ChatMessage, Event, Role, Task, TaskStatus, Timeline, ToolStatus};
 use fennec_ui::markdown::{artifact_kind, diff_counts, rich_div};
 use fennec_ui::theme::{find_preset_index, theme_presets};
-use fennec_ui::widgets::{action_card, ai_header, attachment_card, edit_card, queue_strip, speak_tts, truncate, user_bubble};
+use fennec_ui::widgets::{action_card, ai_header, attachment_card, attachment_chips, composer_dock, composer_toolbar, edit_card, queue_strip, speak_tts, truncate, user_bubble};
 use fennec_ui::workspace_dialog::open_workspace_dialog;
 use gpui_kit::base::Root;
 use gpui_kit::component::{
@@ -173,12 +173,16 @@ impl Default for PermissionMode {
 }
 
 impl PermissionMode {
-    fn label(&self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
-            Self::AskEveryTime => "Ask every time",
-            Self::AutoApprove => "Auto approve",
-            Self::FullAccess => "Full access",
+            Self::AskEveryTime => "ask",
+            Self::AutoApprove => "auto",
+            Self::FullAccess => "full",
         }
+    }
+
+    fn label(&self) -> &'static str {
+        fennec_ui::controls::access_label(self.as_str())
     }
 
     fn description(&self) -> &'static str {
@@ -190,19 +194,11 @@ impl PermissionMode {
     }
 
     fn icon(&self) -> &'static str {
-        match self {
-            Self::AskEveryTime => "🛡",
-            Self::AutoApprove => "🕐",
-            Self::FullAccess => "⚠",
-        }
+        fennec_ui::controls::access_icon(self.as_str())
     }
 
     fn color(&self, t: &gpui_kit::component::Theme) -> gpui::Hsla {
-        match self {
-            Self::AskEveryTime => t.primary,
-            Self::AutoApprove => t.success,
-            Self::FullAccess => t.red,
-        }
+        fennec_ui::controls::access_color(self.as_str(), t)
     }
 }
 
@@ -504,12 +500,7 @@ impl App {
     }
 
     fn model_display_name(&self) -> String {
-        match self.model.as_str() {
-            "qwen3_5_moe" => "Qwen3.5-MoE".to_string(),
-            "edge0_145b" => "Edge0-145B".to_string(),
-            "qwen36_35b" => "Qwen36-35B".to_string(),
-            _ => self.model.clone(),
-        }
+        fennec_ui::controls::model_display_name(&self.model)
     }
 
     /// The status a task's pane shows. A task with no timeline yet has not
@@ -932,7 +923,7 @@ impl App {
             }
             let samples = buffer.lock().unwrap().clone();
             let rate = rate_arc.load(Ordering::Relaxed);
-            let text = transcribe_samples(&samples, rate);
+            let text = fennec_ui::controls::transcribe_samples(&samples, rate);
             let _ = tx.send(UiEv::SttText(text));
         });
     }
@@ -1504,57 +1495,6 @@ fn tool_icon(category: &str) -> &'static str {
         "CMD" => "⚙",
         _ => "•",
     }
-}
-
-/// Write captured mono f32 samples to a WAV and POST to the faster-whisper
-/// sidecar (port 8183). Tries the OpenAI-compatible route then /transcribe.
-fn transcribe_samples(samples: &[f32], rate: u32) -> String {
-    if samples.is_empty() {
-        return String::new();
-    }
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut wav = Vec::new();
-    {
-        let mut writer = match hound::WavWriter::new(std::io::Cursor::new(&mut wav), spec) {
-            Ok(w) => w,
-            Err(_) => return String::new(),
-        };
-        for &s in samples {
-            let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-            let _ = writer.write_sample(v);
-        }
-        let _ = writer.finalize();
-    }
-    let client = match reqwest::blocking::Client::builder().timeout(Duration::from_secs(60)).build() {
-        Ok(c) => c,
-        Err(_) => return String::new(),
-    };
-    for path in ["/v1/audio/transcriptions", "/transcribe"] {
-        let url = format!("http://127.0.0.1:8183{}", path);
-        let part = match reqwest::blocking::multipart::Part::bytes(wav.clone())
-            .file_name("audio.wav")
-            .mime_str("audio/wav")
-        {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let form = reqwest::blocking::multipart::Form::new()
-            .part("file", part)
-            .text("model", "whisper-1");
-        if let Ok(resp) = client.post(&url).multipart(form).send() {
-            if let Ok(json) = resp.json::<Value>() {
-                if let Some(text) = json.get("text").and_then(|t| t.as_str()) {
-                    return text.to_string();
-                }
-            }
-        }
-    }
-    String::new()
 }
 
 impl Render for App {
@@ -2333,60 +2273,45 @@ impl App {
             col = col.child(Label::new(self.line.clone()).text_size(px(12.0)).text_color(t.yellow));
         }
 
-        // Show attachments above composer if any
+        // Shared composer pieces from fennec-ui (chips, dock, toolbar).
+        let weak = cx.entity().downgrade();
         if !self.attachments.is_empty() {
-            let mut attach_row = div().flex().flex_wrap().gap_1().px_2().py_1();
-            for (i, att) in self.attachments.iter().enumerate() {
-                let name = att.name.clone();
-                let is_image = att.mime_type.starts_with("image/");
-                attach_row = attach_row.child(
-                    div().flex().items_center().gap_1().px_2().py_1().rounded_md().bg(t.muted)
-                        .child(Label::new(if is_image { "🖼" } else { "📄" }).text_size(px(12.0)))
-                        .child(Label::new(name).text_size(px(11.0)).truncate())
-                        .child(Button::new(format!("att-remove-{}", i)).label("×").ghost().small().w(px(22.0)).h(px(22.0)).text_color(t.muted_foreground).text_color(t.muted_foreground)
-                            .on_click(cx.listener(move |a, _, _, cx| {
-                                a.remove_attachment(i, cx);
-                            })))
-                );
-            }
-            col = col.child(attach_row);
+            let items: Vec<(String, bool)> = self.attachments.iter()
+                .map(|a| (a.name.clone(), a.mime_type.starts_with("image/"))).collect();
+            let w = weak.clone();
+            col = col.child(attachment_chips(&t, &items, move |i, _window, cx| {
+                let _ = w.update(cx, |a, cx| a.remove_attachment(i, cx));
+            }));
         }
 
+        let w_attach = weak.clone();
+        let w_perm = weak.clone();
+        let w_model = weak.clone();
+        let w_mic = weak.clone();
+        let w_send = weak;
         col = col
-            .child(div().id("composer-dock").rounded_md().border_1().border_color(t.border).p_3()
-                .child(Label::new("Ask Fennec to inspect, edit, test, or explain your code").text_size(px(13.0)).text_color(t.muted_foreground))
-                .child(div().mt_2().child(Input::new(&self.composer))))
-            .child(div().flex().items_center().justify_between()
-                .child(div().flex().items_center().gap_1()
-                    .child(Button::new("composer-new-task").label("+").ghost().small()
-                        .on_click(cx.listener(|a, _, _, cx| { a.new_draft(); cx.notify(); })))
-                    .child(Button::new("composer-attach").ghost().small()
-                        .child(Label::new("📎").text_size(px(15.0)))
-                        .on_click(cx.listener(|a, _, window, cx| {
-                            a.attach_file(window, cx);
-                        })))
-                    .child(Button::new("permission-trigger").ghost().small()
-                        .child(Label::new(format!("{} {}", mode.icon(), mode.label())).text_size(px(12.0)).text_color(mode.color(&t)))
-                        .on_click(cx.listener(|a, _, _, cx| {
-                            a.permission_dropdown_open = !a.permission_dropdown_open;
-                            a.model_dropdown_open = false;
-                            cx.notify();
-                        }))))
-                .child(div().flex().items_center().gap_2()
-                    .child(Button::new("model-trigger").label(format!("⚡ {}", self.model_display_name())).ghost().small()
-                        .on_click(cx.listener(|a, _, _, cx| {
-                            a.model_dropdown_open = !a.model_dropdown_open;
-                            a.permission_dropdown_open = false;
-                            cx.notify();
-                        })))
-                    .child(Button::new("composer-mic").ghost().small()
-                        .child(Label::new(if self.stt_recording { "⏹" } else { "🎤" }).text_size(px(15.0)))
-                        .on_click(cx.listener(|a, _, window, cx| {
-                            a.start_stt(window, cx);
-                        })))
-                    .child(Button::new("send").label("↑").primary().small()
-                        .when(!send_enabled, |b| b.disabled(true))
-                        .on_click(cx.listener(|a, _, window, cx| { a.send(window, cx); })))));
+            .child(composer_dock(&t, &self.composer, "Ask Fennec to inspect, edit, test, or explain your code"))
+            .child(composer_toolbar(
+                &t,
+                &fennec_ui::plugin::default_plugins(),
+                mode.icon(), mode.label(), mode.color(&t),
+                &self.model_display_name(),
+                self.stt_recording,
+                send_enabled,
+                move |window, cx| { let _ = w_attach.update(cx, |a, cx| a.attach_file(window, cx)); },
+                move |_window, cx| { let _ = w_perm.update(cx, |a, cx| {
+                    a.permission_dropdown_open = !a.permission_dropdown_open;
+                    a.model_dropdown_open = false;
+                    cx.notify();
+                }); },
+                move |_window, cx| { let _ = w_model.update(cx, |a, cx| {
+                    a.model_dropdown_open = !a.model_dropdown_open;
+                    a.permission_dropdown_open = false;
+                    cx.notify();
+                }); },
+                move |window, cx| { let _ = w_mic.update(cx, |a, cx| a.start_stt(window, cx)); },
+                move |window, cx| { let _ = w_send.update(cx, |a, cx| a.send(window, cx)); },
+            ));
         col
     }
 
@@ -2395,116 +2320,50 @@ impl App {
     /// every description in full.
     fn dropdowns(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
+        let weak = cx.entity().downgrade();
         let mut overlay = div();
         if self.permission_dropdown_open {
-            overlay = overlay.child(
-                div().absolute().bottom(px(70.0)).left(px(20.0))
-                    .rounded_md().border_1().border_color(t.border).bg(t.background).shadow_lg()
-                    .p_2().w(px(460.0)).flex().flex_col().gap_1()
-                    .child(self.permission_option("ask", "🛡", "Ask every time", "Always ask before commands, external edits, and internet use", cx))
-                    .child(self.permission_option("auto", "🕐", "Auto approve", "Only asks when a potential risk is detected.", cx))
-                    .child(self.permission_option_danger("full", "⚠", "Full access", "Never ask, with full access to your files, terminal, and the internet", cx))
-            );
+            let w = weak.clone();
+            overlay = overlay.child(fennec_ui::controls::permission_dropdown(
+                &t,
+                self.permission_mode.as_str(),
+                move |mode, _window, cx| {
+                    let _ = w.update(cx, |a, cx| {
+                        a.permission_mode = match mode.as_str() {
+                            "auto" => PermissionMode::AutoApprove,
+                            "full" => PermissionMode::FullAccess,
+                            _ => PermissionMode::AskEveryTime,
+                        };
+                        a.permission_dropdown_open = false;
+                        cx.notify();
+                    });
+                },
+            ));
         }
         if self.model_dropdown_open {
-            overlay = overlay.child(
-                div().absolute().bottom(px(70.0)).right(px(20.0))
-                    .rounded_md().border_1().border_color(t.border).bg(t.background).shadow_lg()
-                    .p_2().w(px(220.0)).flex().flex_col().gap_1()
-                    .child(Button::new("model-qwen35").ghost().small().w_full().justify_start()
-                        .child(div().flex().items_center().gap_3().px_3().py_2()
-                            .child(Label::new("Qwen3.5-MoE").text_size(px(13.0)).font_weight(FontWeight::MEDIUM))
-                            .child(div().flex_1())
-                            .child(Label::new(if self.model == "qwen3_5_moe" { "✓" } else { "" }).text_size(px(13.0)).text_color(t.success)))
-                        .on_click(cx.listener(|a, _, _, cx| {
-                            a.model = "qwen3_5_moe".to_string();
-                            a.model_dropdown_open = false;
-                            a.save_settings();
-                            cx.notify();
-                        })))
-                    .child(Button::new("model-edge0").ghost().small().w_full().justify_start()
-                        .child(div().flex().items_center().gap_3().px_3().py_2()
-                            .child(Label::new("Edge0-145B").text_size(px(13.0)).font_weight(FontWeight::MEDIUM))
-                            .child(div().flex_1())
-                            .child(Label::new(if self.model == "edge0_145b" { "✓" } else { "" }).text_size(px(13.0)).text_color(t.success)))
-                        .on_click(cx.listener(|a, _, _, cx| {
-                            a.model = "edge0_145b".to_string();
-                            a.model_dropdown_open = false;
-                            a.save_settings();
-                            cx.notify();
-                        })))
-                    .child(Button::new("model-qwen36").ghost().small().w_full().justify_start()
-                        .child(div().flex().items_center().gap_3().px_3().py_2()
-                            .child(Label::new("Qwen36-35B").text_size(px(13.0)).font_weight(FontWeight::MEDIUM))
-                            .child(div().flex_1())
-                            .child(Label::new(if self.model == "qwen36_35b" { "✓" } else { "" }).text_size(px(13.0)).text_color(t.success)))
-                        .on_click(cx.listener(|a, _, _, cx| {
-                            a.model = "qwen36_35b".to_string();
-                            a.model_dropdown_open = false;
-                            a.save_settings();
-                            cx.notify();
-                        })))
-                    .child(div().border_t_1().border_color(t.border).my_1())
-                    .child(Button::new("model-download").ghost().small().w_full().justify_start()
-                        .child(div().flex().items_center().gap_3().px_3().py_2()
-                            .child(Label::new("⬇").text_size(px(15.0)))
-                            .child(Label::new("Download new model...").text_size(px(12.0)).text_color(t.muted_foreground)))
-                        .on_click(cx.listener(|a, _, window, cx| {
-                            window.push_notification(gpui_kit::component::notification::Notification::info("Model download coming soon."), cx);
-                            a.model_dropdown_open = false;
-                            cx.notify();
-                        })))
-            );
+            let w_sel = weak.clone();
+            let w_dl = weak;
+            overlay = overlay.child(fennec_ui::controls::model_dropdown(
+                &t,
+                &self.model,
+                move |model, _window, cx| {
+                    let _ = w_sel.update(cx, |a, cx| {
+                        a.model = model;
+                        a.model_dropdown_open = false;
+                        a.save_settings();
+                        cx.notify();
+                    });
+                },
+                move |window, cx| {
+                    window.push_notification(gpui_kit::component::notification::Notification::info("Model download coming soon."), cx);
+                    let _ = w_dl.update(cx, |a, cx| {
+                        a.model_dropdown_open = false;
+                        cx.notify();
+                    });
+                },
+            ));
         }
         overlay
-    }
-
-    fn permission_option(&self, mode_id: &str, icon: &str, title: &str, desc: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.theme().clone();
-        let current_mode = self.permission_mode.clone();
-        let is_selected = match mode_id {
-            "ask" => current_mode == PermissionMode::AskEveryTime,
-            "auto" => current_mode == PermissionMode::AutoApprove,
-            "full" => current_mode == PermissionMode::FullAccess,
-            _ => false,
-        };
-        let mode_id = mode_id.to_string();
-        Button::new(format!("perm-opt-{}", mode_id)).ghost().w_full().justify_start()
-            .on_click(cx.listener(move |a, _, _, cx| {
-                a.permission_mode = match mode_id.as_str() {
-                    "ask" => PermissionMode::AskEveryTime,
-                    "auto" => PermissionMode::AutoApprove,
-                    "full" => PermissionMode::FullAccess,
-                    _ => PermissionMode::AskEveryTime,
-                };
-                a.permission_dropdown_open = false;
-                cx.notify();
-            }))
-            .child(div().flex().items_start().gap_3().px_3().py_3().w_full()
-                .child(Label::new(icon).text_size(px(18.0)).mt(px(2.0)))
-                .child(div().flex().flex_col().flex_1().gap_0p5()
-                    .child(Label::new(title).text_size(px(13.0)).font_weight(FontWeight::MEDIUM))
-                    .child(Label::new(desc).text_size(px(11.0)).text_color(t.muted_foreground)))
-                .child(Label::new(if is_selected { "✓" } else { "" }).text_size(px(13.0)).text_color(t.success).mt(px(2.0))))
-    }
-
-    fn permission_option_danger(&self, mode_id: &str, icon: &str, title: &str, desc: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.theme().clone();
-        let current_mode = self.permission_mode.clone();
-        let is_selected = current_mode == PermissionMode::FullAccess;
-        let mode_id = mode_id.to_string();
-        Button::new(format!("perm-opt-{}", mode_id)).ghost().w_full().justify_start()
-            .on_click(cx.listener(move |a, _, _, cx| {
-                a.permission_mode = PermissionMode::FullAccess;
-                a.permission_dropdown_open = false;
-                cx.notify();
-            }))
-            .child(div().flex().items_start().gap_3().px_3().py_3().w_full()
-                .child(Label::new(icon).text_size(px(18.0)).mt(px(2.0)))
-                .child(div().flex().flex_col().flex_1().gap_0p5()
-                    .child(Label::new(title).text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(t.red))
-                    .child(Label::new(desc).text_size(px(11.0)).text_color(t.muted_foreground)))
-                .child(Label::new(if is_selected { "✓" } else { "" }).text_size(px(13.0)).text_color(t.success).mt(px(2.0))))
     }
 
     fn right(&self, cx: &mut Context<Self>) -> impl IntoElement {
