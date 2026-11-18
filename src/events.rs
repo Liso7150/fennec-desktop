@@ -24,6 +24,11 @@ pub struct ToolEvent {
     /// Seconds since the run started, from the step's own `t`.
     pub started_t: f64,
     pub duration: String,
+    /// How many turns the timeline had already shown when this call started —
+    /// the user message and the answers, not the loop's own notes. It is what
+    /// puts the call in the stretch between two answers, and so in that
+    /// stretch's block.
+    pub after: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Default, Debug)]
@@ -208,6 +213,13 @@ pub struct Timeline {
 }
 
 impl Timeline {
+    /// The turns the user counts as separating one stretch of actions from the
+    /// next: their own message and the answers. The loop's reasoning notes are
+    /// not answers, so they do not close a block.
+    pub fn boundaries(&self) -> usize {
+        self.messages.iter().filter(|m| m.role != Role::Progress).count()
+    }
+
     pub fn apply(&mut self, ev: Event) {
         match ev {
             Event::Message(m) => {
@@ -227,8 +239,7 @@ impl Timeline {
                     Some(card) => {
                         if finished && card.status == ToolStatus::Running {
                             card.duration = format!("{:.1}s", (t.started_t - card.started_t).max(0.0));
-                        }
-                        card.status = t.status;
+                        }                        card.status = t.status;
                         if !t.output.is_empty() {
                             card.output = t.output;
                         }
@@ -242,7 +253,14 @@ impl Timeline {
                             card.exit = t.exit;
                         }
                     }
-                    None => self.tools.push(t),
+                    None => {
+                        // A card keeps the position it opened at: the result step
+                        // that closes it arrives later, and the answer in between
+                        // has already moved the timeline on.
+                        let mut card = t;
+                        card.after = self.boundaries();
+                        self.tools.push(card);
+                    }
                 }
             }
             Event::Plan(entries) => self.plan = entries,
@@ -416,6 +434,7 @@ pub fn map_step(step: &Value) -> Vec<Event> {
                 exit: None,
                 started_t: t,
                 duration: String::new(),
+                after: 0,
             })]
         }
         "tool" => {
@@ -434,6 +453,7 @@ pub fn map_step(step: &Value) -> Vec<Event> {
                 exit: step["result"]["exit"].as_i64(),
                 started_t: t,
                 duration: String::new(),
+                after: 0,
             })]
         }
         "approval_required" => {
@@ -713,7 +733,7 @@ mod tests {
     #[test]
     fn cancelled_run_warns_on_open_cards() {
         let mut tl = Timeline::default();
-        tl.apply(Event::Tool(ToolEvent { id: "c1".into(), category: "CMD".into(), title: "t".into(), status: ToolStatus::Running, detail: String::new(), output: String::new(), path: None, exit: None, started_t: 0.0, duration: String::new() }));
+        tl.apply(Event::Tool(ToolEvent { id: "c1".into(), category: "CMD".into(), title: "t".into(), status: ToolStatus::Running, detail: String::new(), output: String::new(), path: None, exit: None, started_t: 0.0, after: 0, duration: String::new() }));
         tl.apply(Event::Cancelled);
         assert_eq!(tl.tools[0].status, ToolStatus::Warning);
         assert_eq!(tl.status, TaskStatus::Waiting);
@@ -730,9 +750,9 @@ mod tests {
     #[test]
     fn artifacts_come_from_edit_cards_only() {
         let mut tl = Timeline::default();
-        tl.apply(Event::Tool(ToolEvent { id: "a".into(), category: "EDIT".into(), title: "Write file src/x.py".into(), status: ToolStatus::Complete, detail: String::new(), output: "+1".into(), path: Some("src/x.py".into()), exit: None, started_t: 0.0, duration: "0.1s".into() }));
-        tl.apply(Event::Tool(ToolEvent { id: "b".into(), category: "READ".into(), title: "Read file src/y.py".into(), status: ToolStatus::Complete, detail: String::new(), output: String::new(), path: Some("src/y.py".into()), exit: None, started_t: 0.0, duration: "0.1s".into() }));
-        tl.apply(Event::Tool(ToolEvent { id: "c".into(), category: "EDIT".into(), title: "Edit file notes/todo list.md".into(), status: ToolStatus::Complete, detail: String::new(), output: "~1".into(), path: Some("notes/todo list.md".into()), exit: None, started_t: 0.0, duration: "0.1s".into() }));
+        tl.apply(Event::Tool(ToolEvent { id: "a".into(), category: "EDIT".into(), title: "Write file src/x.py".into(), status: ToolStatus::Complete, detail: String::new(), output: "+1".into(), path: Some("src/x.py".into()), exit: None, started_t: 0.0, after: 0, duration: "0.1s".into() }));
+        tl.apply(Event::Tool(ToolEvent { id: "b".into(), category: "READ".into(), title: "Read file src/y.py".into(), status: ToolStatus::Complete, detail: String::new(), output: String::new(), path: Some("src/y.py".into()), exit: None, started_t: 0.0, after: 0, duration: "0.1s".into() }));
+        tl.apply(Event::Tool(ToolEvent { id: "c".into(), category: "EDIT".into(), title: "Edit file notes/todo list.md".into(), status: ToolStatus::Complete, detail: String::new(), output: "~1".into(), path: Some("notes/todo list.md".into()), exit: None, started_t: 0.0, after: 0, duration: "0.1s".into() }));
         let arts = tl.artifacts();
         assert_eq!(arts.len(), 2);
         assert_eq!(arts[0].name, "src/x.py");
@@ -764,5 +784,30 @@ mod tests {
             fresh.apply(e);
         }
         assert!(fresh.plan.is_empty());
+    }
+
+    /// Action blocks are cut at message boundaries, so a card has to record how
+    /// many answers already sat above it when it opened — and a reasoning note
+    /// is not an answer, or every thought would split a block in two.
+    #[test]
+    fn a_tool_card_records_the_answer_stretch_it_opened_in() {
+        let mut tl = Timeline::default();
+        tl.messages.push(ChatMessage { role: Role::User, text: "do it".into(), time: String::new() });
+        for step in [
+            json!({"type":"tool_start","t":1.0,"name":"write_file","call_id":"c1","args":{"path":"a.py"}}),
+            json!({"type":"assistant","t":2.0,"reasoning":"let me think","content":"done"}),
+            json!({"type":"tool_start","t":3.0,"name":"run_shell","call_id":"c2","args":{"cmd":"pytest"}}),
+        ] {
+            for e in map_step(&step) {
+                tl.apply(e);
+            }
+        }
+        // The user prompt is boundary 1; the reasoning note is skipped, so the
+        // answer is boundary 2 and the command opened after it.
+        assert_eq!(tl.boundaries(), 2);
+        assert_eq!(
+            tl.tools.iter().map(|c| c.after).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
     }
 }

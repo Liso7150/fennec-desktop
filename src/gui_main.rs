@@ -14,12 +14,12 @@ use fennec_client::{git, suite, Core, Outlet};
 use fennec_desktop::events::{self, ApprovalState, ChatMessage, Event, Role, Task, TaskStatus, Timeline, ToolStatus};
 use fennec_ui::attention::{
     ApprovalCard, ApprovedCommand, CardState, approved_commands_panel, approval_card,
-    attention_badge, delivery_summary, delivery_verb_from_title, needs_attention,
+    attention_badge, delivery_verb_from_title, needs_attention,
 };
-use fennec_ui::markdown::{artifact_badge, diff_counts, rich_div};
+use fennec_ui::markdown::{artifact_badge, attachment_subtitle, diff_counts, rich_div};
 use fennec_ui::theme::{find_preset_index, theme_presets};
-use fennec_ui::timeline::{CallShape, GroupRow, ran_title, split_calls, written_title};
-use fennec_ui::widgets::{action_card, ai_header, attachment_chips, composer_dock, composer_toolbar, queue_strip, show_output, speak_tts, tool_group, truncate, user_bubble};
+use fennec_ui::timeline::{CallShape, GroupRow, actions_title, group_segments, is_open, reveal_text, short_text, unique_actions, unique_writes};
+use fennec_ui::widgets::{action_card, ai_header, attachment_card, attachment_chips, composer_dock, composer_toolbar, queue_strip, show_output, speak_tts, tool_group, truncate, user_bubble};
 use fennec_ui::workspace_dialog::open_workspace_dialog;
 use gpui_kit::base::Root;
 use gpui_kit::component::{
@@ -109,7 +109,7 @@ struct HistoryTimeline {
     status: String,
     /// The files the run wrote, as (path, verb). A finished run's tool cards are
     /// not re-fetched, so without this a task reopened after a restart would
-    /// have no chip and no "Delivered N files" to answer what it changed.
+    /// have no rows and no "Delivered N files" to answer what it changed.
     #[serde(default)]
     delivered: Vec<(String, String)>,
 }
@@ -125,12 +125,15 @@ struct HistoryMessage {
 /// call the run is still waiting on has written nothing, and a failed one wrote
 /// nothing. One place, because the transcript card, the closing summary, the
 /// inspector list and the saved history all have to answer "what changed" with
-/// the same set.
+/// the same set. Rewriting one file is still one file, so a path appears once —
+/// with the verb of the write that left it as it now is.
 fn delivered_files(tl: &Timeline) -> Vec<(&str, &str)> {
-    tl.tools.iter()
+    let writes: Vec<(&str, &str)> = tl.tools.iter()
         .filter(|c| c.category == "EDIT" && c.status != ToolStatus::Failed && c.status != ToolStatus::Running)
         .filter_map(|c| Some((c.path.as_deref()?, delivery_verb_from_title(&c.title)?)))
-        .collect()
+        .collect();
+    let paths: Vec<&str> = writes.iter().map(|(p, _)| *p).collect();
+    unique_writes(&paths).into_iter().map(|i| writes[i]).collect()
 }
 
 /// How long a prompt may wait for a cold engine. The service gives the warm-up
@@ -318,7 +321,11 @@ struct App {
     settings_open: bool,
     permission_dropdown_open: bool,
     username: String,
+    /// What the user clicked open: an action block's key or a running call's id.
     expanded: HashSet<String>,
+    /// Action blocks the user clicked shut. Kept apart from `expanded` because a
+    /// block can be open without ever having been clicked: the newest one is.
+    group_closed: HashSet<String>,
     /// Thought/reasoning rows the user has opened; collapsed is the default.
     open_thoughts: HashSet<String>,
     toasts: Vec<Toast>,
@@ -488,7 +495,7 @@ impl App {
             attention_only: false, right_open: true, search_open: false, settings_open: false,
             permission_dropdown_open: false,
             username: "Liso7150".to_string(),
-            expanded: HashSet::new(), open_thoughts: HashSet::new(),
+            expanded: HashSet::new(), group_closed: HashSet::new(), open_thoughts: HashSet::new(),
             toasts: Vec::new(), line: String::new(), pending_send: None,
             composer_restore: None, chat_cancel: None, rx, tx, busy: false,
             task_queue: Vec::new(), timeline_scroll: ScrollHandle::new(), follow_tail: Cell::new(true),
@@ -1387,6 +1394,9 @@ impl App {
             // A finished run's tool cards are not re-fetched, so rebuild the
             // ones that carry a result: the files it wrote. Without them a task
             // reopened after a restart has no chip and no summary left.
+            // History keeps no per-call position, so they all land in the last
+            // stretch — the one after the run's final answer.
+            let last = tl.boundaries();
             for (path, verb) in htl.delivered {
                 let wrote = verb == "created";
                 tl.tools.push(events::ToolEvent {
@@ -1400,6 +1410,7 @@ impl App {
                     exit: None,
                     started_t: 0.0,
                     duration: String::new(),
+                    after: last,
                 });
             }
             self.timelines.insert(id, tl);
@@ -1490,6 +1501,19 @@ impl App {
             .filter(|t| !self.attention_only || self.task_needs_attention(t))
             .filter(|t| q.is_empty() || t.title.to_lowercase().contains(&q) || t.goal.to_lowercase().contains(&q))
             .collect()
+    }
+
+    /// The click on a block header. Opening is remembered as an opening, closing
+    /// as a veto, so the default — only the newest block open — stops deciding
+    /// this block either way once the user has.
+    fn toggle_group(&mut self, key: &str, was_open: bool) {
+        if was_open {
+            self.expanded.remove(key);
+            self.group_closed.insert(key.to_string());
+        } else {
+            self.group_closed.remove(key);
+            self.expanded.insert(key.to_string());
+        }
     }
 
     /// Show what git says about the file an edit touched. A single-file diff is
@@ -1598,6 +1622,13 @@ fn tool_icon(category: &str) -> &'static str {
         "CMD" => "⚙",
         _ => "•",
     }
+}
+
+/// What a row inside an action block leads to: the change in the file it wrote,
+/// or the whole call and whatever it returned.
+enum RowOpen {
+    File(String),
+    Text(String, String),
 }
 
 impl Render for App {
@@ -2184,7 +2215,139 @@ impl App {
                 }
             }
         }
+        // Every action between two answers, folded into one block, built here and
+        // drawn where it happened: a card carries the turn count it opened at, so
+        // its block lands between the same messages the run made it between.
+        // A call the run is still inside never joins a block: it is the one row
+        // whose output is still arriving, and a count of unfinished work would be
+        // a promise. A write that failed wrote nothing, so it folds with the
+        // calls that merely ran.
+        let anchors: Vec<usize> = tl.tools.iter().map(|c| c.after).collect();
+        let shape = |card: &events::ToolEvent, running: bool| CallShape {
+            wrote: card.category == "EDIT" && card.status != ToolStatus::Failed,
+            running,
+        };
+        let shapes: Vec<CallShape> = tl.tools.iter().map(|c| shape(c, c.status == ToolStatus::Running)).collect();
+        let segments = group_segments(&anchors, &shapes);
+        let newest = segments.len().saturating_sub(1);
+        let mut stretches: HashMap<usize, gpui_kit::AnyElement> = HashMap::new();
+        for (idx, seg) in segments.iter().enumerate() {
+            let mut block = div().flex().flex_col().gap_2();
+            if !seg.settled.is_empty() {
+                // One row per file, the last write of it winning, and every
+                // command on its own line: the block says what the run delivered,
+                // not how often it repeated itself.
+                let mut local: Vec<CallShape> = Vec::with_capacity(seg.settled.len());
+                let mut called: Vec<String> = Vec::with_capacity(seg.settled.len());
+                for &i in &seg.settled {
+                    let card = &tl.tools[i];
+                    local.push(shape(card, false));
+                    called.push(card.path.clone().unwrap_or_default());
+                }
+                let refs: Vec<&str> = called.iter().map(String::as_str).collect();
+                let mut rows: Vec<GroupRow> = Vec::new();
+                let mut opens: Vec<RowOpen> = Vec::new();
+                for &j in &unique_actions(&local, &refs) {
+                    let card = &tl.tools[seg.settled[j]];
+                    let path = card.path.clone().unwrap_or_default();
+                    if local[j].wrote {
+                        let name = std::path::Path::new(&path).file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| if path.is_empty() { card.title.clone() } else { path.clone() });
+                        let (adds, dels) = diff_counts(&format!("{}\n{}", card.detail, card.output));
+                        let verb = delivery_verb_from_title(&card.title).unwrap_or("changed");
+                        rows.push(GroupRow::call(artifact_badge(&name), &path, &card.title, verb.to_string()).change(adds, dels));
+                        // A file row leads to the change in it. The delivered chip
+                        // is a separate card under the answer, so one file still
+                        // means one row and one chip.
+                        opens.push(RowOpen::File(path));
+                    } else {
+                        let mut status = card.status.label().to_string();
+                        if !card.duration.is_empty() {
+                            status.push_str(&format!(" · {}", card.duration));
+                        }
+                        if let Some(code) = card.exit {
+                            status.push_str(&format!(" · exit {code}"));
+                        }
+                        let row = GroupRow::call(tool_icon(&card.category).to_string(), &path, &card.title, status);
+                        rows.push(match card.status {
+                            ToolStatus::Failed => row.failed(),
+                            _ => row,
+                        });
+                        // The block hides the call, but its output is the one thing
+                        // the user may still want in full, so the row opens it.
+                        opens.push(RowOpen::Text(card.title.clone(), format!("{}\n{}", card.detail, card.output)));
+                    }
+                }
+                if !rows.is_empty() {
+                    let key = format!("group:{timeline_id}:{}", seg.after);
+                    let open = is_open(self.expanded.contains(&key), self.group_closed.contains(&key), idx == newest);
+                    let held = key.clone();
+                    let weak_g = weak.clone();
+                    let on_toggle = move |_: &mut Window, cx: &mut gpui::App| {
+                        let _ = weak_g.update(cx, |a, cx| {
+                            a.toggle_group(&held, open);
+                            cx.notify();
+                        });
+                    };
+                    let weak_r = weak.clone();
+                    // Shared, not copied: every row of the block points at the
+                    // same list of destinations.
+                    let opens: Rc<Vec<RowOpen>> = Rc::new(opens);
+                    let on_row = move |i: usize, window: &mut Window, cx: &mut gpui::App| {
+                        match opens.get(i) {
+                            Some(RowOpen::Text(title, text)) => show_output(title, text, window, cx),
+                            Some(RowOpen::File(path)) if !path.is_empty() => {
+                                let path = path.clone();
+                                let _ = weak_r.update(cx, |a, cx| {
+                                    a.review_edit(path, window, cx);
+                                    cx.notify();
+                                });
+                            }
+                            _ => {}
+                        }
+                    };
+                    block = block.child(tool_group(&t, idx as u64, "⚙", &actions_title(rows.len()), &rows, open, on_toggle, Some(on_row)));
+                }
+            }
+            // The call the run is inside, alone and expandable beside its block,
+            // so its output can be watched as it arrives.
+            for &i in &seg.live {
+                let card = &tl.tools[i];
+                let open = self.expanded.contains(&card.id);
+                let key = card.id.clone();
+                let weak2 = weak.clone();
+                let on_toggle = move |_: &mut Window, cx: &mut gpui::App| {
+                    let _ = weak2.update(cx, |a, cx| {
+                        if a.expanded.contains(&key) { a.expanded.remove(&key); }
+                        else { a.expanded.insert(key.clone()); }
+                        cx.notify();
+                    });
+                };
+                let mut status_text = card.status.label().to_string();
+                if !card.duration.is_empty() {
+                    status_text.push_str(&format!(" · {}", card.duration));
+                }
+                let detail = match (card.detail.is_empty(), card.output.is_empty()) {
+                    (true, true) => String::new(),
+                    (false, true) => card.detail.clone(),
+                    (true, false) => card.output.clone(),
+                    (false, false) => format!("{}\n{}", card.detail, card.output),
+                };
+                let short = short_text(card.path.as_deref().unwrap_or_default(), &card.title);
+                // The header keeps the shortened words; opening the card prints the
+                // whole call above whatever it has returned so far.
+                let shown = reveal_text(&short, &card.title, &detail);
+                block = block.child(action_card(&t, i as u64, tool_icon(&card.category), &short,
+                    &shown, &status_text, tool_color(&t, card.status), open, on_toggle));
+            }
+            stretches.insert(seg.after, block.into_any_element());
+        }
         let mut midx = 0usize;
+        // Turn count already drawn, which is the anchor of the block that comes
+        // next: the actions taken before any answer, if the run has any.
+        let mut boundary = 0usize;
+        if let Some(el) = stretches.remove(&boundary) { list = list.child(el); }
         while midx < tl.messages.len() {
             let m = &tl.messages[midx];
             if m.role == Role::User {
@@ -2192,6 +2355,8 @@ impl App {
                 // no header, just the message.
                 list = list.child(user_bubble(&t, &m.text, midx));
                 midx += 1;
+                boundary += 1;
+                if let Some(el) = stretches.remove(&boundary) { list = list.child(el); }
                 continue;
             }
             if m.role == Role::Progress {
@@ -2285,6 +2450,9 @@ impl App {
             block = block.child(rich_div(&t, &m.text, false, midx));
             list = list.child(block);
             midx += 1;
+            boundary += 1;
+            // The answer closes the stretch before it and opens the one after.
+            if let Some(el) = stretches.remove(&boundary) { list = list.child(el); }
         }
         if tl.streaming && !tl.streaming_text.is_empty() {
             let header = ai_header(&t, tl.messages.len() as u64, "", None::<fn(&mut Window, &mut gpui::App)>)
@@ -2333,143 +2501,53 @@ impl App {
                 });
             }));
         }
-        // The calls folded into the two shared blocks. A call the run is still
-        // inside never joins a block: it is the one row whose output is still
-        // arriving, and a count of unfinished work would be a promise. A write
-        // that failed wrote nothing, so it folds with the calls that merely ran.
-        let shapes: Vec<CallShape> = tl.tools.iter()
-            .map(|c| CallShape {
-                wrote: c.category == "EDIT" && c.status != ToolStatus::Failed,
-                running: c.status == ToolStatus::Running,
-            })
-            .collect();
-        let groups = split_calls(&shapes);
-        // The blocks have no call id to key their open state on, so they use one
-        // no id can collide with.
-        let toggle = |key: &'static str| {
-            let weak = weak.clone();
-            move |_: &mut Window, cx: &mut gpui::App| {
-                let _ = weak.update(cx, |a, cx| {
-                    if a.expanded.contains(key) { a.expanded.remove(key); }
-                    else { a.expanded.insert(key.to_string()); }
-                    cx.notify();
-                });
-            }
-        };
-
-        if !groups.written.is_empty() {
-            let mut rows: Vec<GroupRow> = Vec::new();
-            let mut paths: Vec<String> = Vec::new();
-            for &i in &groups.written {
-                let card = &tl.tools[i];
-                let path = card.path.clone().unwrap_or_default();
-                let name = std::path::Path::new(&path).file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| if path.is_empty() { card.title.clone() } else { path.clone() });
-                let (adds, dels) = diff_counts(&format!("{}\n{}", card.detail, card.output));
-                let verb = delivery_verb_from_title(&card.title).unwrap_or("changed");
-                rows.push(GroupRow::new(artifact_badge(&name), path.clone(), verb.to_string()).change(adds, dels));
-                paths.push(path);
-            }
-            // A file row leads to the change in it, which is the route the
-            // delivered chip used before the block replaced it.
-            let weak_r = weak.clone();
-            list = list.child(tool_group(&t, 0, "✎", &written_title(rows.len()), &rows,
-                self.expanded.contains("group:written"), toggle("group:written"),
-                Some(move |i: usize, window: &mut Window, cx: &mut gpui::App| {
-                    let Some(path) = paths.get(i).cloned().filter(|p| !p.is_empty()) else { return };
-                    let _ = weak_r.update(cx, |a, cx| { a.review_edit(path, window, cx); cx.notify(); });
-                })));
-        }
-
-        if !groups.ran.is_empty() {
-            let mut rows: Vec<GroupRow> = Vec::new();
-            let mut outputs: Vec<(String, String)> = Vec::new();
-            for &i in &groups.ran {
-                let card = &tl.tools[i];
-                let mut status = card.status.label().to_string();
-                if !card.duration.is_empty() {
-                    status.push_str(&format!(" · {}", card.duration));
-                }
-                if let Some(code) = card.exit {
-                    status.push_str(&format!(" · exit {code}"));
-                }
-                rows.push(match card.status {
-                    ToolStatus::Failed => GroupRow::new(tool_icon(&card.category).to_string(), card.title.clone(), status).failed(),
-                    _ => GroupRow::new(tool_icon(&card.category).to_string(), card.title.clone(), status),
-                });
-                outputs.push((card.title.clone(), format!("{}\n{}", card.detail, card.output)));
-            }
-            // The block hides the call, but a command's output is the one thing
-            // the user may still want in full, so a row opens it.
-            let on_row = move |i: usize, window: &mut Window, cx: &mut gpui::App| {
-                if let Some((title, text)) = outputs.get(i) {
-                    show_output(title, text, window, cx);
-                }
-            };
-            list = list.child(tool_group(&t, 1, "⚙", &ran_title(rows.len()), &rows,
-                self.expanded.contains("group:ran"), toggle("group:ran"), Some(on_row)));
-        }
-
-        // The call the run is inside, alone and expandable, so its output can be
-        // watched as it arrives.
-        for &i in &groups.live {
-            let card = &tl.tools[i];
-            let open = self.expanded.contains(&card.id);
-            let key = card.id.clone();
-            let weak2 = weak.clone();
-            let on_toggle = move |_: &mut Window, cx: &mut gpui::App| {
-                let _ = weak2.update(cx, |a, cx| {
-                    if a.expanded.contains(&key) { a.expanded.remove(&key); }
-                    else { a.expanded.insert(key.clone()); }
-                    cx.notify();
-                });
-            };
-            let mut status_text = card.status.label().to_string();
-            if !card.duration.is_empty() {
-                status_text.push_str(&format!(" · {}", card.duration));
-            }
-            let detail = match (card.detail.is_empty(), card.output.is_empty()) {
-                (true, true) => String::new(),
-                (false, true) => card.detail.clone(),
-                (true, false) => card.output.clone(),
-                (false, false) => format!("{}\n{}", card.detail, card.output),
-            };
-            list = list.child(action_card(&t, i as u64, tool_icon(&card.category), &card.title,
-                &detail, &status_text, tool_color(&t, card.status), open, on_toggle));
-        }
         // The run's final text, shown once as an assistant turn. The old green
         // "Summary" card duplicated the answer; when the backend sent only a
         // `final` step, this is where that text lives.
         let last_assistant = tl.messages.iter().rev()
             .find(|m| m.role == Role::Assistant)
             .map(|m| m.text.trim().to_string());
-        // What the run put on disk, listed under its answer. The answer itself
-        // may be suppressed as a duplicate of an earlier message, but the files
-        // it produced are still delivered, so this has to survive that case.
+        // What the run put on disk is delivered as a chip per file under its
+        // answer — the same card the agent shell and the PWA draw — because the
+        // answer itself may be suppressed as a duplicate while the files it
+        // wrote are still there to open.
         let delivered = delivered_files(&tl);
-        let delivery = delivery_summary(&delivered);
         let answer_shown = !tl.summary.is_empty()
             && last_assistant.as_deref() != Some(tl.summary.trim());
-        if answer_shown || !delivery.is_empty() {
+        if answer_shown || !delivered.is_empty() {
             let sidx = tl.messages.len() + 1;
             let speak_text = tl.summary.clone();
-            let body = match (answer_shown, delivery.is_empty()) {
-                (true, true) => tl.summary.clone(),
-                (true, false) => format!("{}\n\n{}", tl.summary, delivery),
-                (false, false) => delivery.clone(),
-                (false, true) => String::new(),
-            };
             let header = ai_header(&t, sidx as u64, "", Some(move |window: &mut Window, cx: &mut gpui::App| {
                 speak_tts(&speak_text, window, cx);
             }));
-            list = list.child(div().id(ElementId::Name("summary-turn".into()))
-                .flex().flex_col().gap_1()
-                .child(header)
-                .child(rich_div(&t, &body, false, sidx)));
+            let mut turn = div().id(ElementId::Name("summary-turn".into()))
+                .flex().flex_col().gap_2()
+                .child(div().flex().flex_col().gap_1().child(header));
+            if answer_shown {
+                turn = turn.child(rich_div(&t, &tl.summary, false, sidx));
+            }
+            for (di, (path, verb)) in delivered.iter().enumerate() {
+                let name = std::path::Path::new(path).file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string());
+                let subtitle = attachment_subtitle(path, &name);
+                let shown = path.to_string();
+                let weak_d = weak.clone();
+                turn = turn.child(attachment_card(&t, sidx as u64 * 100 + di as u64, &name, &subtitle, verb,
+                    Some(move |window: &mut Window, cx: &mut gpui::App| {
+                        let shown = shown.clone();
+                        let _ = weak_d.update(cx, |a, cx| {
+                            a.review_edit(shown, window, cx);
+                            cx.notify();
+                        });
+                    })));
+            }
+            list = list.child(turn);
         }
         list
-    }    fn queue(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    }
+
+    fn queue(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         if self.task_queue.is_empty() {
             return div().into_any_element();

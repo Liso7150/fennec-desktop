@@ -2309,6 +2309,7 @@ mod tests {
             exit: None,
             started_t: 0.4,
             duration: "1.1 s".into(),
+            after: 0,
         }));
         tl.apply(Event::Plan(vec![
             PlanEntry { content: "Inspect the workspace".into(), done: true },
