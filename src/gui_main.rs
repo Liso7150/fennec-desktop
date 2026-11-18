@@ -2048,6 +2048,25 @@ impl App {
         }
         // Walked by index so consecutive reasoning chunks coalesce into one
         // Thinking block, the way a single model turn actually reads.
+        // Reasoning that precedes an answer is attached to that answer and
+        // revealed by clicking the summary/header over the AI message.
+        let mut thoughts_for: std::collections::HashMap<usize, Vec<String>> = std::collections::HashMap::new();
+        {
+            let mut i = 0usize;
+            while i < tl.messages.len() {
+                if tl.messages[i].role == Role::Progress {
+                    let s = i;
+                    let mut e = i;
+                    while e < tl.messages.len() && tl.messages[e].role == Role::Progress { e += 1; }
+                    if e < tl.messages.len() && tl.messages[e].role == Role::Assistant {
+                        thoughts_for.insert(e, tl.messages[s..e].iter().map(|p| p.text.clone()).collect());
+                    }
+                    i = e;
+                } else {
+                    i += 1;
+                }
+            }
+        }
         let mut midx = 0usize;
         while midx < tl.messages.len() {
             let m = &tl.messages[midx];
@@ -2070,6 +2089,12 @@ impl App {
                 let open = self.open_thoughts.contains(&key);
                 let time = first.time.clone();
                 let chunks: Vec<String> = tl.messages[start..end].iter().map(|p| p.text.clone()).collect();
+                // If these thoughts belong to a following answer, render them
+                // there (behind its summary toggle) instead of standalone.
+                if thoughts_for.contains_key(&end) {
+                    midx = end;
+                    continue;
+                }
                 let count = chunks.len();
                 let key2 = key.clone();
                 let weak2 = weak.clone();
@@ -2101,14 +2126,47 @@ impl App {
                 continue;
             }
             // The assistant's finished answer: plain text under a small header.
+            // The header carries a "Thoughts" summary toggle that reveals/hides
+            // the reasoning that produced this answer.
             let speak_text = m.text.clone();
-            let header = ai_header(&t, midx as u64, &m.time, Some(move |window: &mut Window, cx: &mut gpui::App| {
+            let mut header = ai_header(&t, midx as u64, &m.time, Some(move |window: &mut Window, cx: &mut gpui::App| {
                 speak_tts(&speak_text, window, cx);
             }));
-            list = list.child(div().id(ElementId::NamedInteger("msg".into(), midx as u64))
+            let thought_chunks = thoughts_for.get(&midx).cloned();
+            let tkey = format!("{}:a{}", timeline_id, midx);
+            let topen = self.open_thoughts.contains(&tkey);
+            if let Some(chunks) = &thought_chunks {
+                let n = chunks.len();
+                let tk = tkey.clone();
+                let weak_t = weak.clone();
+                header = header.child(
+                    Button::new(ElementId::Name(format!("sum-tog-{midx}").into()))
+                        .ghost().xsmall()
+                        .on_click(move |_, _, cx| {
+                            let _ = weak_t.update(cx, |a, cx| {
+                                if a.open_thoughts.contains(&tk) { a.open_thoughts.remove(&tk); }
+                                else { a.open_thoughts.insert(tk.clone()); }
+                                cx.notify();
+                            });
+                        })
+                        .child(Label::new(format!("{} Thoughts ({})", if topen { "▾" } else { "▸" }, n))
+                            .text_size(px(10.5)).text_color(t.success)),
+                );
+            }
+            let mut block = div().id(ElementId::NamedInteger("msg".into(), midx as u64))
                 .flex().flex_col().gap_1()
-                .child(header)
-                .child(rich_div(&t, &m.text, false, midx)));
+                .child(header);
+            if topen {
+                if let Some(chunks) = &thought_chunks {
+                    let mut body = div().flex().flex_col().gap_1();
+                    for (i, r) in chunks.iter().enumerate() {
+                        body = body.child(rich_div(&t, r, true, midx * 100 + i));
+                    }
+                    block = block.child(body);
+                }
+            }
+            block = block.child(rich_div(&t, &m.text, false, midx));
+            list = list.child(block);
             midx += 1;
         }
         if tl.streaming && !tl.streaming_text.is_empty() {
