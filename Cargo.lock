@@ -2129,6 +2129,7 @@ dependencies = [
  "eframe",
  "fennec-client",
  "fennec-economy",
+ "fennec-ui",
  "gpui-kit",
  "hex",
  "hound",
@@ -2155,6 +2156,13 @@ name = "fennec-pyjson"
 version = "1.0.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "fennec-ui"
+version = "1.0.0"
+dependencies = [
+ "gpui-kit",
 ]
 
 [[package]]

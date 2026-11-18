@@ -32,6 +32,7 @@ hex = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 fennec-client = { path = "../fennec-core/src/fennec-client" }
 fennec-economy = { path = "../fennec-economy" }
+fennec-ui = { path = "../fennec-ui" }
 rfd = "0.15"
 base64 = "0.22"
 cpal = "0.15"
