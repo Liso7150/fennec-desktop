@@ -16,9 +16,10 @@ use fennec_ui::attention::{
     ApprovalCard, ApprovedCommand, CardState, approved_commands_panel, approval_card,
     attention_badge, delivery_summary, delivery_verb_from_title, needs_attention,
 };
-use fennec_ui::markdown::{attachment_subtitle, diff_counts, rich_div};
+use fennec_ui::markdown::{artifact_badge, diff_counts, rich_div};
 use fennec_ui::theme::{find_preset_index, theme_presets};
-use fennec_ui::widgets::{action_card, ai_header, attachment_card, attachment_chips, composer_dock, composer_toolbar, edit_card, queue_strip, speak_tts, truncate, user_bubble};
+use fennec_ui::timeline::{CallShape, GroupRow, ran_title, split_calls, written_title};
+use fennec_ui::widgets::{action_card, ai_header, attachment_chips, composer_dock, composer_toolbar, queue_strip, show_output, speak_tts, tool_group, truncate, user_bubble};
 use fennec_ui::workspace_dialog::open_workspace_dialog;
 use gpui_kit::base::Root;
 use gpui_kit::component::{
@@ -708,6 +709,20 @@ impl App {
                         let entry = self.seen_at.entry(t.id.clone()).or_insert_with(events::now_stamp).clone();
                         let mut t = t;
                         t.updated = time_ago(&entry);
+                        // A timeline only hears that a run ended from the steps its
+                        // own poller forwarded. A task this window never followed —
+                        // one the service already listed when the app started — has
+                        // no poller, so it would read Running forever and `is_working`
+                        // would hold the warm queue shut. Only a run the service says
+                        // is over crosses over; one stopped on an approval still
+                        // reports `running`, so it stays as the poller left it.
+                        if let Some(tl) = self.timelines.get_mut(&t.id) {
+                            if tl.status == TaskStatus::Running
+                                && !matches!(t.status, TaskStatus::Running | TaskStatus::AwaitingApproval)
+                            {
+                                tl.status = t.status;
+                            }
+                        }
                         match self.tasks.iter_mut().find(|x| x.id == t.id) {
                             Some(existing) => {
                                 existing.status = t.status;
@@ -2318,17 +2333,89 @@ impl App {
                 });
             }));
         }
-        for (ci, card) in tl.tools.iter().enumerate() {
+        // The calls folded into the two shared blocks. A call the run is still
+        // inside never joins a block: it is the one row whose output is still
+        // arriving, and a count of unfinished work would be a promise. A write
+        // that failed wrote nothing, so it folds with the calls that merely ran.
+        let shapes: Vec<CallShape> = tl.tools.iter()
+            .map(|c| CallShape {
+                wrote: c.category == "EDIT" && c.status != ToolStatus::Failed,
+                running: c.status == ToolStatus::Running,
+            })
+            .collect();
+        let groups = split_calls(&shapes);
+        // The blocks have no call id to key their open state on, so they use one
+        // no id can collide with.
+        let toggle = |key: &'static str| {
+            let weak = weak.clone();
+            move |_: &mut Window, cx: &mut gpui::App| {
+                let _ = weak.update(cx, |a, cx| {
+                    if a.expanded.contains(key) { a.expanded.remove(key); }
+                    else { a.expanded.insert(key.to_string()); }
+                    cx.notify();
+                });
+            }
+        };
+
+        if !groups.written.is_empty() {
+            let mut rows: Vec<GroupRow> = Vec::new();
+            let mut paths: Vec<String> = Vec::new();
+            for &i in &groups.written {
+                let card = &tl.tools[i];
+                let path = card.path.clone().unwrap_or_default();
+                let name = std::path::Path::new(&path).file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| if path.is_empty() { card.title.clone() } else { path.clone() });
+                let (adds, dels) = diff_counts(&format!("{}\n{}", card.detail, card.output));
+                let verb = delivery_verb_from_title(&card.title).unwrap_or("changed");
+                rows.push(GroupRow::new(artifact_badge(&name), path.clone(), verb.to_string()).change(adds, dels));
+                paths.push(path);
+            }
+            // A file row leads to the change in it, which is the route the
+            // delivered chip used before the block replaced it.
+            let weak_r = weak.clone();
+            list = list.child(tool_group(&t, 0, "✎", &written_title(rows.len()), &rows,
+                self.expanded.contains("group:written"), toggle("group:written"),
+                Some(move |i: usize, window: &mut Window, cx: &mut gpui::App| {
+                    let Some(path) = paths.get(i).cloned().filter(|p| !p.is_empty()) else { return };
+                    let _ = weak_r.update(cx, |a, cx| { a.review_edit(path, window, cx); cx.notify(); });
+                })));
+        }
+
+        if !groups.ran.is_empty() {
+            let mut rows: Vec<GroupRow> = Vec::new();
+            let mut outputs: Vec<(String, String)> = Vec::new();
+            for &i in &groups.ran {
+                let card = &tl.tools[i];
+                let mut status = card.status.label().to_string();
+                if !card.duration.is_empty() {
+                    status.push_str(&format!(" · {}", card.duration));
+                }
+                if let Some(code) = card.exit {
+                    status.push_str(&format!(" · exit {code}"));
+                }
+                rows.push(match card.status {
+                    ToolStatus::Failed => GroupRow::new(tool_icon(&card.category).to_string(), card.title.clone(), status).failed(),
+                    _ => GroupRow::new(tool_icon(&card.category).to_string(), card.title.clone(), status),
+                });
+                outputs.push((card.title.clone(), format!("{}\n{}", card.detail, card.output)));
+            }
+            // The block hides the call, but a command's output is the one thing
+            // the user may still want in full, so a row opens it.
+            let on_row = move |i: usize, window: &mut Window, cx: &mut gpui::App| {
+                if let Some((title, text)) = outputs.get(i) {
+                    show_output(title, text, window, cx);
+                }
+            };
+            list = list.child(tool_group(&t, 1, "⚙", &ran_title(rows.len()), &rows,
+                self.expanded.contains("group:ran"), toggle("group:ran"), Some(on_row)));
+        }
+
+        // The call the run is inside, alone and expandable, so its output can be
+        // watched as it arrives.
+        for &i in &groups.live {
+            let card = &tl.tools[i];
             let open = self.expanded.contains(&card.id);
-            // A write that failed delivered nothing: it reads as the failed
-            // call it is, not as a file the user can open.
-            let is_edit = card.category == "EDIT" && card.status != ToolStatus::Failed;
-            // A call that has not finished has delivered nothing. While the loop
-            // is stopped on its approval the path is only a promise, so neither
-            // the card above it nor the closing summary may present it as a file
-            // the user can already open.
-            let finished = card.status != ToolStatus::Running;
-            let (adds, dels) = diff_counts(&format!("{}\n{}", card.detail, card.output));
             let key = card.id.clone();
             let weak2 = weak.clone();
             let on_toggle = move |_: &mut Window, cx: &mut gpui::App| {
@@ -2338,46 +2425,9 @@ impl App {
                     cx.notify();
                 });
             };
-            if is_edit {
-                // A file the run produced is shown like an attachment above the
-                // change that made it; clicking either reviews the same diff.
-                if let Some(p) = card.path.as_deref().filter(|_| finished) {
-                    let name = std::path::Path::new(p).file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| p.to_string());
-                    let subtitle = attachment_subtitle(p, &name);
-                    let review_path = p.to_string();
-                    let weak3 = weak.clone();
-                    list = list.child(attachment_card(&t, ci as u64, &name, &subtitle, "…",
-                        Some(move |window: &mut Window, cx: &mut gpui::App| {
-                            let _ = weak3.update(cx, |a, cx| { a.review_edit(review_path.clone(), window, cx); cx.notify(); });
-                        })));
-                }
-                let wrote = card.title.starts_with("Write");
-                let title = match (finished, wrote) {
-                    (true, true) => "Created 1 file",
-                    (true, false) => "Edited 1 file",
-                    // Still gated or still running: the diff is a proposal, so
-                    // the row may not claim the file exists yet.
-                    (false, true) => "Will create 1 file",
-                    (false, false) => "Will edit 1 file",
-                };
-                let detail = if card.output.is_empty() { card.detail.clone() } else { card.output.clone() };
-                let review_path = card.path.clone().unwrap_or_default();
-                let weak3 = weak.clone();
-                let on_review = move |window: &mut Window, cx: &mut gpui::App| {
-                    let _ = weak3.update(cx, |a, cx| { a.review_edit(review_path.clone(), window, cx); cx.notify(); });
-                };
-                list = list.child(edit_card(&t, ci as u64, title, adds, dels,
-                    card.path.as_deref().unwrap_or(""), &detail, open, on_toggle, on_review));
-                continue;
-            }
             let mut status_text = card.status.label().to_string();
             if !card.duration.is_empty() {
                 status_text.push_str(&format!(" · {}", card.duration));
-            }
-            if let Some(code) = card.exit {
-                status_text.push_str(&format!(" · exit {code}"));
             }
             let detail = match (card.detail.is_empty(), card.output.is_empty()) {
                 (true, true) => String::new(),
@@ -2385,7 +2435,7 @@ impl App {
                 (true, false) => card.output.clone(),
                 (false, false) => format!("{}\n{}", card.detail, card.output),
             };
-            list = list.child(action_card(&t, ci as u64, tool_icon(&card.category), &card.title,
+            list = list.child(action_card(&t, i as u64, tool_icon(&card.category), &card.title,
                 &detail, &status_text, tool_color(&t, card.status), open, on_toggle));
         }
         // The run's final text, shown once as an assistant turn. The old green

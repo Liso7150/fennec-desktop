@@ -17,12 +17,15 @@ jobs:
         include:
           - os: windows-latest
             exe: fennec-desktop.exe
+            gui: fennec-desktop-gui.exe
             rust: stable
           - os: macos-latest
             exe: fennec-desktop
+            gui: fennec-desktop-gui
             rust: stable
           - os: ubuntu-latest
             exe: fennec-desktop
+            gui: fennec-desktop-gui
             rust: stable
     runs-on: ${{ matrix.os }}
     steps:
@@ -51,11 +54,16 @@ jobs:
       - name: Test
         working-directory: fennec-desktop
         run: cargo test --release
+      # The `gui` feature is what users run: fennec-desktop-gui is the current
+      # shell. Its release build compiles shaders with fxc.exe, which the SDK on
+      # these runners provides and a bare dev box usually does not.
       - name: Build
         working-directory: fennec-desktop
-        run: cargo build --release
+        run: cargo build --release --features gui
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: fennec-desktop-${{ matrix.os }}
-          path: fennec-desktop/target/release/${{ matrix.exe }}
+          path: |
+            fennec-desktop/target/release/${{ matrix.exe }}
+            fennec-desktop/target/release/${{ matrix.gui }}
