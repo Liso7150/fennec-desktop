@@ -12,7 +12,11 @@
 use fennec_client::engine::{ChatDelta, Engine};
 use fennec_client::{git, suite, Core, Outlet};
 use fennec_desktop::events::{self, ApprovalState, ChatMessage, Event, Role, Task, TaskStatus, Timeline, ToolStatus};
-use fennec_ui::markdown::{artifact_kind, diff_counts, rich_div};
+use fennec_ui::attention::{
+    ApprovalCard, ApprovedCommand, CardState, approved_commands_panel, approval_card,
+    attention_badge, delivery_summary, delivery_verb_from_title, needs_attention,
+};
+use fennec_ui::markdown::{attachment_subtitle, diff_counts, rich_div};
 use fennec_ui::theme::{find_preset_index, theme_presets};
 use fennec_ui::widgets::{action_card, ai_header, attachment_card, attachment_chips, composer_dock, composer_toolbar, edit_card, queue_strip, speak_tts, truncate, user_bubble};
 use fennec_ui::workspace_dialog::open_workspace_dialog;
@@ -102,6 +106,11 @@ struct HistoryTimeline {
     messages: Vec<HistoryMessage>,
     summary: String,
     status: String,
+    /// The files the run wrote, as (path, verb). A finished run's tool cards are
+    /// not re-fetched, so without this a task reopened after a restart would
+    /// have no chip and no "Delivered N files" to answer what it changed.
+    #[serde(default)]
+    delivered: Vec<(String, String)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -109,6 +118,18 @@ struct HistoryMessage {
     role: String,
     text: String,
     time: String,
+}
+
+/// The files this run put on disk, as the delivery presentation sees them: a
+/// call the run is still waiting on has written nothing, and a failed one wrote
+/// nothing. One place, because the transcript card, the closing summary, the
+/// inspector list and the saved history all have to answer "what changed" with
+/// the same set.
+fn delivered_files(tl: &Timeline) -> Vec<(&str, &str)> {
+    tl.tools.iter()
+        .filter(|c| c.category == "EDIT" && c.status != ToolStatus::Failed && c.status != ToolStatus::Running)
+        .filter_map(|c| Some((c.path.as_deref()?, delivery_verb_from_title(&c.title)?)))
+        .collect()
 }
 
 /// How long a prompt may wait for a cold engine. The service gives the warm-up
@@ -281,6 +302,9 @@ struct App {
     /// Sessions whose steps this window has already asked the service for, so
     /// a task selected after a restart is fetched once rather than every frame.
     replayed: HashSet<String>,
+    /// Session ids the service listed on its last poll. A restored task is only
+    /// worth re-fetching while the service still holds it.
+    live_sessions: HashSet<String>,
     composer: Entity<InputState>,
     search: Entity<InputState>,
     username_input: Entity<InputState>,
@@ -457,7 +481,8 @@ impl App {
         let mut app = Self {
             suite: s, workspaces, ws: 0, workspace_items: Vec::new(), active_workspace_id: None, core, engine, env: Env::default(),
             tasks: Vec::new(), seen_at: HashMap::new(), selected: String::new(),
-            timelines: HashMap::new(), replayed: HashSet::new(), composer, search, username_input,
+            timelines: HashMap::new(), replayed: HashSet::new(),
+            live_sessions: HashSet::new(), composer, search, username_input,
             permission_mode: PermissionMode::AskEveryTime,
             attention_only: false, right_open: true, search_open: false, settings_open: false,
             permission_dropdown_open: false,
@@ -570,9 +595,29 @@ impl App {
         if id.is_empty() || id.starts_with("draft-") || self.replayed.contains(&id) {
             return;
         }
-        self.replayed.insert(id.clone());
-        if self.timelines.get(&id).map(|t| !t.messages.is_empty()).unwrap_or(false) {
+        let restored = self.timelines.get(&id).map(|t| !t.messages.is_empty()).unwrap_or(false);
+        // History keeps the transcript, but a question the run is waiting on is
+        // a step only the service has. Rebuilding from a session it still lists
+        // is what lets an approval survive a restart: otherwise the pill and
+        // the badge both claim the run waits for an answer while the screen
+        // shows nothing that could give one.
+        let resumable = self.live_sessions.contains(&id)
+            && self.tasks.iter().find(|t| t.id == id)
+                .map(|t| matches!(t.status,
+                    TaskStatus::Running | TaskStatus::AwaitingApproval | TaskStatus::NeedsAttention))
+                .unwrap_or(false);
+        if restored && !resumable {
+            // The service has not listed this session yet, so history is all
+            // there is for now. Deciding that permanently would hide a
+            // question that arrives a poll later.
             return;
+        }
+        self.replayed.insert(id.clone());
+        if restored {
+            if let Some(tl) = self.timelines.get_mut(&id) {
+                tl.messages.clear();
+                tl.approvals.clear();
+            }
         }
         let goal = self.tasks.iter().find(|t| t.id == id)
             .map(|t| t.goal.clone()).unwrap_or_default();
@@ -658,6 +703,7 @@ impl App {
                     self.flush_warm_queue();
                 }
                 UiEv::Sessions(list) => {
+                    self.live_sessions = list.iter().map(|t| t.id.clone()).collect();
                     for t in list {
                         let entry = self.seen_at.entry(t.id.clone()).or_insert_with(events::now_stamp).clone();
                         let mut t = t;
@@ -1063,6 +1109,12 @@ impl App {
                     self.follow_tail.set(true);
                     self.seen_at.insert(id.clone(), events::now_stamp());
                     self.busy = true;
+                    // This run is already being followed from here. Without
+                    // claiming it, `replay_history` sees a live, unrestored
+                    // session, clears the transcript and starts a second
+                    // follower — and every step then lands in the timeline
+                    // twice.
+                    self.replayed.insert(id.clone());
                     self.follow(id.clone());
                     self.save_history();
                 }
@@ -1243,13 +1295,7 @@ impl App {
                 .map(|t| HistoryTask {
                 id: t.id.clone(),
                 title: t.title.clone(),
-                status: match t.status {
-                    TaskStatus::Running => "Running",
-                    TaskStatus::Complete => "Complete",
-                    TaskStatus::NeedsAttention => "NeedsAttention",
-                    TaskStatus::Waiting => "Waiting",
-                    TaskStatus::AwaitingApproval => "AwaitingApproval",
-                }.to_string(),
+                status: t.status.key().to_string(),
                 updated: t.updated.clone(),
                 goal: t.goal.clone(),
                 draft: t.draft,
@@ -1271,13 +1317,8 @@ impl App {
                         time: m.time.clone(),
                     }).collect(),
                     summary: tl.summary.clone(),
-                    status: match tl.status {
-                        TaskStatus::Running => "Running",
-                        TaskStatus::Complete => "Complete",
-                        TaskStatus::NeedsAttention => "NeedsAttention",
-                        TaskStatus::Waiting => "Waiting",
-                        TaskStatus::AwaitingApproval => "AwaitingApproval",
-                    }.to_string(),
+                    status: tl.status.key().to_string(),
+                    delivered: delivered_files(tl).into_iter().map(|(p, v)| (p.to_string(), v.to_string())).collect(),
                 })
             }).collect(),
             seen_at: self.seen_at.clone(),
@@ -1328,6 +1369,24 @@ impl App {
                 "AwaitingApproval" => TaskStatus::AwaitingApproval,
                 _ => TaskStatus::Waiting,
             };
+            // A finished run's tool cards are not re-fetched, so rebuild the
+            // ones that carry a result: the files it wrote. Without them a task
+            // reopened after a restart has no chip and no summary left.
+            for (path, verb) in htl.delivered {
+                let wrote = verb == "created";
+                tl.tools.push(events::ToolEvent {
+                    id: format!("delivered-{path}"),
+                    category: "EDIT".into(),
+                    title: format!("{} file {}", if wrote { "Write" } else { "Edit" }, path),
+                    status: ToolStatus::Complete,
+                    detail: String::new(),
+                    output: String::new(),
+                    path: Some(path),
+                    exit: None,
+                    started_t: 0.0,
+                    duration: String::new(),
+                });
+            }
             self.timelines.insert(id, tl);
         }
         // Drop empty drafts so a fresh install shows an empty history.
@@ -1366,16 +1425,54 @@ impl App {
         }
     }
 
+    /// Questions this task is still holding open, answered or expired ones
+    /// excluded: the badge counts what the user can still act on.
+    fn pending_approvals(&self, task_id: &str) -> usize {
+        self.timelines.get(task_id)
+            .map(|tl| tl.approvals.iter()
+                .filter(|a| a.state == events::ApprovalState::Pending)
+                .count())
+            .unwrap_or(0)
+    }
+
+    /// A run the user owes an answer to — stopped for approval, or holding a
+    /// question its status string has not caught up with yet.
+    fn task_needs_attention(&self, t: &Task) -> bool {
+        needs_attention(t.status.key(), self.pending_approvals(&t.id))
+    }
+
     fn attention_count(&self) -> usize {
-        self.tasks.iter()
-            .filter(|t| matches!(t.status, TaskStatus::NeedsAttention | TaskStatus::AwaitingApproval))
-            .count()
+        self.tasks.iter().filter(|t| self.task_needs_attention(t)).count()
+    }
+
+    /// The commands the user has already answered, for the My Attention list.
+    fn approved_commands(&self) -> Vec<ApprovedCommand> {
+        let mut out = Vec::new();
+        for t in &self.tasks {
+            if let Some(tl) = self.timelines.get(&t.id) {
+                for a in &tl.approvals {
+                    if a.state == events::ApprovalState::Answered {
+                        out.push(ApprovedCommand {
+                            task_id: t.id.clone(),
+                            task_title: t.title.clone(),
+                            // The card's human line ("Write file x"), not the raw
+                            // argument JSON: the list says what was answered, and a
+                            // quoted blob of arguments says nothing at a glance.
+                            command: if a.title.is_empty() { a.name.clone() } else { a.title.clone() },
+                            risk: a.risk.clone(),
+                            decision: a.decision.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn filtered_tasks(&self, query: &str) -> Vec<&Task> {
         let q = query.to_lowercase();
         self.tasks.iter()
-            .filter(|t| !self.attention_only || matches!(t.status, TaskStatus::NeedsAttention | TaskStatus::AwaitingApproval))
+            .filter(|t| !self.attention_only || self.task_needs_attention(t))
             .filter(|t| q.is_empty() || t.title.to_lowercase().contains(&q) || t.goal.to_lowercase().contains(&q))
             .collect()
     }
@@ -1452,15 +1549,6 @@ fn status_color(t: &Theme, s: TaskStatus) -> Hsla {
 
 /// The backend's own risk tiers, in the palette's three signal colours. A risk
 /// the gate table did not name gets the neutral colour, never green.
-fn risk_color(t: &Theme, risk: &str) -> Hsla {
-    match risk {
-        "high" => t.red,
-        "medium" => t.yellow,
-        "low" => t.success,
-        _ => t.muted_foreground,
-    }
-}
-
 fn tool_color(t: &Theme, s: ToolStatus) -> Hsla {
     match s {
         ToolStatus::Running => t.primary,
@@ -1576,13 +1664,27 @@ impl App {
             .child(Button::new("nav-attention").ghost().small().w_full().justify_start()
                 .child(div().flex().items_center().gap_2()
                     .child(Label::new("▷").text_size(px(14.0)))
-                    .child(Label::new("My Attention").text_size(px(13.0))))
+                    .child(Label::new("My Attention").text_size(px(13.0)))
+                    .children(attention_badge(&t, attention)))
+                .when(self.attention_only, |b| b.bg(t.yellow.opacity(0.15)))
                 .on_click(cx.listener(|a, _, _, cx| { a.attention_only = !a.attention_only; cx.notify(); })))
             .child(Button::new("nav-search").ghost().small().w_full().justify_start()
                 .child(div().flex().items_center().gap_2()
                     .child(Label::new("⌕").text_size(px(14.0)))
                     .child(Label::new("Search").text_size(px(13.0))))
                 .on_click(cx.listener(|a, _, _, cx| { a.search_open = !a.search_open; a.attention_only = false; cx.notify(); }))));
+
+        // My Attention: the commands the user already answered, click to jump.
+        rail = rail.children(self.attention_only.then(|| {
+            let weak = cx.entity().downgrade();
+            approved_commands_panel(&t, &self.approved_commands(), move |task_id, _window, cx| {
+                let _ = weak.update(cx, |a, cx| {
+                    a.selected = task_id;
+                    a.attention_only = false;
+                    cx.notify();
+                });
+            })
+        }));
 
         // Search dock
         rail = rail.children(self.search_open.then(|| {
@@ -2189,44 +2291,43 @@ impl App {
         // A gated call the loop is stopped on. Above the tool cards, because
         // this is the one thing here that cannot move until the user does.
         for card in &tl.approvals {
-            let live = card.state == ApprovalState::Pending;
-            let mut card_div = div().id(ElementId::Name(format!("appr-{}", card.id).into()))
-                .rounded_md().border_1().border_color(t.border).bg(t.muted).px_3().py_2().flex().flex_col().gap_1();
-            card_div = card_div
-                .child(div().flex().items_center().justify_between()
-                    .child(div().flex().items_center().gap_2()
-                        .child(div().px_1().rounded_md().bg(risk_color(&t, &card.risk))
-                            .child(Label::new(card.category.clone()).font_family("monospace").text_size(px(10.0)).text_color(t.background)))
-                        .child(Label::new(card.title.clone()).text_size(px(12.5))))
-                    .child(Label::new(format!("{} risk", card.risk)).text_size(px(11.0)).text_color(risk_color(&t, &card.risk))));
-            if !card.reason.is_empty() {
-                card_div = card_div.child(Label::new(card.reason.clone()).text_size(px(11.5)).text_color(t.muted_foreground));
-            }
-            if let Some(path) = card.path.as_deref() {
-                card_div = card_div.child(Label::new(format!("file · {path}")).font_family("monospace").text_size(px(11.0)).text_color(t.muted_foreground));
-            }
-            card_div = card_div.child(Label::new(card.detail.clone()).font_family("monospace").text_size(px(11.0)).text_color(t.muted_foreground));
-            let mut buttons = div().flex().flex_row().flex_wrap().gap_2().mt_1();
-            for decision in events::APPROVAL_DECISIONS {
-                let approval_id = card.id.clone();
-                buttons = buttons.child(
-                    Button::new(ElementId::Name(format!("appr-{}-{}", card.id, decision).into()))
-                        .label(events::decision_label(decision)).ghost().small()
-                        .when(!live, |b| b.disabled(true))
-                        .on_click(cx.listener(move |a, _, _, cx| { a.answer(&approval_id, decision); cx.notify(); }))
-                );
-            }
-            card_div = card_div.child(buttons);
-            card_div = card_div.child(match card.state {
-                ApprovalState::Pending => Label::new("the run waits on this answer").text_size(px(10.5)).text_color(t.yellow),
-                ApprovalState::Answered => Label::new(format!("answer sent · {}", events::decision_label(&card.decision))).text_size(px(10.5)).text_color(t.success),
-                ApprovalState::Expired => Label::new(format!("not used · {}", card.note)).text_size(px(10.5)).text_color(t.red),
-            });
-            list = list.child(card_div);
+            let state = match card.state {
+                ApprovalState::Pending => CardState::Pending,
+                ApprovalState::Answered => CardState::Answered,
+                ApprovalState::Expired => CardState::Expired,
+            };
+            let approval_id = card.id.clone();
+            let shared = ApprovalCard {
+                id: &card.id,
+                category: &card.category,
+                title: &card.title,
+                risk: &card.risk,
+                reason: &card.reason,
+                path: card.path.as_deref(),
+                detail: &card.detail,
+                state,
+                decision: &card.decision,
+                note: &card.note,
+            };
+            let weak = weak.clone();
+            list = list.child(approval_card(&t, &shared, move |decision, _window, cx| {
+                let decision = decision.to_string();
+                let _ = weak.update(cx, |a, cx| {
+                    a.answer(&approval_id, &decision);
+                    cx.notify();
+                });
+            }));
         }
         for (ci, card) in tl.tools.iter().enumerate() {
             let open = self.expanded.contains(&card.id);
-            let is_edit = card.category == "EDIT";
+            // A write that failed delivered nothing: it reads as the failed
+            // call it is, not as a file the user can open.
+            let is_edit = card.category == "EDIT" && card.status != ToolStatus::Failed;
+            // A call that has not finished has delivered nothing. While the loop
+            // is stopped on its approval the path is only a promise, so neither
+            // the card above it nor the closing summary may present it as a file
+            // the user can already open.
+            let finished = card.status != ToolStatus::Running;
             let (adds, dels) = diff_counts(&format!("{}\n{}", card.detail, card.output));
             let key = card.id.clone();
             let weak2 = weak.clone();
@@ -2240,19 +2341,27 @@ impl App {
             if is_edit {
                 // A file the run produced is shown like an attachment above the
                 // change that made it; clicking either reviews the same diff.
-                if let Some(p) = card.path.as_deref() {
-                    let file = std::path::Path::new(p);
-                    let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
-                    let dir = file.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_else(|| ".".into());
-                    let kind = artifact_kind(&name);
+                if let Some(p) = card.path.as_deref().filter(|_| finished) {
+                    let name = std::path::Path::new(p).file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p.to_string());
+                    let subtitle = attachment_subtitle(p, &name);
                     let review_path = p.to_string();
                     let weak3 = weak.clone();
-                    list = list.child(attachment_card(&t, ci as u64, &name, &format!("{dir} · {kind}"), "…",
+                    list = list.child(attachment_card(&t, ci as u64, &name, &subtitle, "…",
                         Some(move |window: &mut Window, cx: &mut gpui::App| {
                             let _ = weak3.update(cx, |a, cx| { a.review_edit(review_path.clone(), window, cx); cx.notify(); });
                         })));
                 }
-                let title = if card.title.starts_with("Write") { "Created 1 file" } else { "Edited 1 file" };
+                let wrote = card.title.starts_with("Write");
+                let title = match (finished, wrote) {
+                    (true, true) => "Created 1 file",
+                    (true, false) => "Edited 1 file",
+                    // Still gated or still running: the diff is a proposal, so
+                    // the row may not claim the file exists yet.
+                    (false, true) => "Will create 1 file",
+                    (false, false) => "Will edit 1 file",
+                };
                 let detail = if card.output.is_empty() { card.detail.clone() } else { card.output.clone() };
                 let review_path = card.path.clone().unwrap_or_default();
                 let weak3 = weak.clone();
@@ -2285,16 +2394,29 @@ impl App {
         let last_assistant = tl.messages.iter().rev()
             .find(|m| m.role == Role::Assistant)
             .map(|m| m.text.trim().to_string());
-        if !tl.summary.is_empty() && last_assistant.as_deref() != Some(tl.summary.trim()) {
+        // What the run put on disk, listed under its answer. The answer itself
+        // may be suppressed as a duplicate of an earlier message, but the files
+        // it produced are still delivered, so this has to survive that case.
+        let delivered = delivered_files(&tl);
+        let delivery = delivery_summary(&delivered);
+        let answer_shown = !tl.summary.is_empty()
+            && last_assistant.as_deref() != Some(tl.summary.trim());
+        if answer_shown || !delivery.is_empty() {
             let sidx = tl.messages.len() + 1;
             let speak_text = tl.summary.clone();
+            let body = match (answer_shown, delivery.is_empty()) {
+                (true, true) => tl.summary.clone(),
+                (true, false) => format!("{}\n\n{}", tl.summary, delivery),
+                (false, false) => delivery.clone(),
+                (false, true) => String::new(),
+            };
             let header = ai_header(&t, sidx as u64, "", Some(move |window: &mut Window, cx: &mut gpui::App| {
                 speak_tts(&speak_text, window, cx);
             }));
             list = list.child(div().id(ElementId::Name("summary-turn".into()))
                 .flex().flex_col().gap_1()
                 .child(header)
-                .child(rich_div(&t, &tl.summary, false, sidx)));
+                .child(rich_div(&t, &body, false, sidx)));
         }
         list
     }    fn queue(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2468,7 +2590,10 @@ impl App {
             let titles: Vec<String> = tl.tools.iter().filter(|c| c.category == *kind).map(|c| c.title.clone()).collect();
             skills.push(InspectItem { id: kind.to_string(), title: kind.to_string(), subtitle: format!("{} call(s)", titles.len()), detail: titles.join("\n"), url: None });
         }
-        let artifacts: Vec<InspectItem> = tl.tools.iter().filter(|c| c.category == "EDIT" && c.path.is_some()).enumerate().map(|(i, c)| {
+        // An artifact is a file that exists, so a write the run has not
+        // finished yet is listed nowhere else in this panel either.
+        let artifacts: Vec<InspectItem> = tl.tools.iter().filter(|c| c.category == "EDIT" && c.path.is_some()
+            && c.status != ToolStatus::Running && c.status != ToolStatus::Failed).enumerate().map(|(i, c)| {
             let p = c.path.clone().unwrap_or_default();
             let name = std::path::Path::new(&p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
             InspectItem { id: format!("{i}-{}", c.id), title: name, subtitle: p.clone(), detail: c.output.clone(), url: None }

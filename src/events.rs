@@ -2,6 +2,7 @@
 //! agent-loop steps and engine chat deltas are plain JSON, and this module
 //! turns them into timeline state — an interpretation only a client does.
 
+use fennec_ui::attention::{args_line, clip, path_of, risk_word as risk_of};
 use serde_json::Value;
 
 /// One tool-activity card, keyed by the loop's `call_id` so the `tool_start`
@@ -83,21 +84,6 @@ pub struct PlanEntry {
 /// hostile step — reads as unknown rather than as a colour nobody chose.
 pub const APPROVAL_RISKS: [&str; 4] = ["low", "medium", "high", "unknown"];
 
-/// `loop._APPROVAL_OPTIONS`. The buttons a shell offers are these four and only
-/// these four: anything else the user sends, the loop refuses.
-pub const APPROVAL_DECISIONS: [&str; 4] = ["allow_once", "allow_always", "reject_once", "reject_always"];
-
-/// What each of the loop's options says on a button.
-pub fn decision_label(decision: &str) -> &'static str {
-    match decision {
-        "allow_once" => "Allow once",
-        "allow_always" => "Allow every time",
-        "reject_once" => "Reject",
-        "reject_always" => "Reject and stop asking",
-        _ => "",
-    }
-}
-
 /// Where one approval question got to.
 #[derive(Clone, Copy, PartialEq, Default, Debug)]
 pub enum ApprovalState {
@@ -153,6 +139,19 @@ impl TaskStatus {
             Self::NeedsAttention => "Needs attention",
             Self::Waiting => "Waiting",
             Self::AwaitingApproval => "Waiting for approval",
+        }
+    }
+
+    /// The word this status is stored and compared as. `label()` is what the
+    /// rail shows; this is what the history file and the attention filter use,
+    /// so the two shells can share one rule about what counts as attention.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Running => "Running",
+            Self::Complete => "Complete",
+            Self::NeedsAttention => "NeedsAttention",
+            Self::Waiting => "Waiting",
+            Self::AwaitingApproval => "AwaitingApproval",
         }
     }
 
@@ -346,33 +345,11 @@ impl Timeline {
     }
 }
 
-/// The loop's tool names → the card's badge and human title. The names are
-/// `loop.py`'s registry; an unknown tool shows its own name rather than a lie.
+/// The loop's tool names → the card's badge and human title. The table lives in
+/// `fennec-ui` so both shells name the same call the same way; an unknown tool
+/// shows its own name rather than a lie.
 pub fn describe(name: &str, args: &Value) -> (String, String) {
-    let focus = |keys: &[&str]| -> String {
-        for k in keys {
-            if let Some(s) = args.get(*k).and_then(|v| v.as_str()) {
-                return s.to_string();
-            }
-        }
-        String::new()
-    };
-    match name {
-        "list_dir" => ("LS".into(), format!("Inspect repository {}", focus(&["path", "dir"]))),
-        "read_file" => ("READ".into(), format!("Read file {}", focus(&["path", "file"]))),
-        "write_file" => ("EDIT".into(), format!("Write file {}", focus(&["path"]))),
-        "edit_file" => ("EDIT".into(), format!("Edit file {}", focus(&["path"]))),
-        "grep" => ("FIND".into(), format!("Search code {}", focus(&["pattern", "query"]))),
-        "semantic_search" => ("FIND".into(), format!("Semantic search {}", focus(&["query"]))),
-        "run_python" => ("TEST".into(), format!("Run python {}", focus(&["code"]).chars().take(48).collect::<String>())),
-        "run_shell" => ("CMD".into(), format!("Run command {}", focus(&["cmd", "command"]))),
-        "git_status" => ("GIT".into(), "Repository status".into()),
-        "git_diff" => ("DIFF".into(), "Review diff".into()),
-        "web_task" => ("WEB".into(), "Web research task".into()),
-        "coworker_task" => ("PEER".into(), "Delegate to OpenBot coworker".into()),
-        "summarise" => ("SUM".into(), "Summarise the run".into()),
-        other => (other.to_uppercase(), other.into()),
-    }
+    fennec_ui::attention::describe_call(name, args)
 }
 
 fn stamp() -> String {
@@ -403,15 +380,6 @@ fn result_preview(result: &Value, ok: bool) -> String {
         }
     }
     result.to_string().chars().take(300).collect()
-}
-
-/// The file a tool was pointed at, read from its own arguments. `describe` uses
-/// the same keys for the title; the diff view needs the value on its own.
-fn path_of(args: &Value) -> Option<String> {
-    ["path", "file"].iter()
-        .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 /// Translate one `/api/agent/poll` step into timeline events. Unknown step
@@ -505,25 +473,6 @@ pub fn map_step(step: &Value) -> Vec<Event> {
         ],
         _ => Vec::new(),
     }
-}
-
-fn args_line(args: &Value) -> String {
-    let compact = serde_json::to_string(args).unwrap_or_default();
-    if compact.chars().count() > 240 { compact.chars().take(240).collect() } else { compact }
-}
-
-/// Text off a step, bounded so a hostile or oversized payload cannot grow a
-/// card. Same limits the PWA puts on the same fields.
-fn clip(s: &str, max: usize) -> String {
-    let t = s.trim();
-    if t.chars().count() > max { t.chars().take(max).collect() } else { t.to_string() }
-}
-
-/// The risk as `tools.GATES` spelled it, or `unknown` for anything else — a
-/// renamed tier included. A card never guesses at a risk it was not told.
-fn risk_of(s: Option<&str>) -> String {
-    let lowered = s.unwrap_or("").trim().to_lowercase();
-    if APPROVAL_RISKS.contains(&lowered.as_str()) { lowered } else { "unknown".into() }
 }
 
 /// The loop's own plan list, read straight off its `plan` step. Nothing here
@@ -748,17 +697,6 @@ mod tests {
         assert_eq!(tl.approvals[0].state, ApprovalState::Expired);
         assert_eq!(tl.approvals[0].note, "the run was cancelled");
         assert_eq!(tl.status, TaskStatus::Waiting);
-    }
-
-    #[test]
-    fn the_buttons_are_exactly_the_options_the_loop_accepts() {
-        for decision in APPROVAL_DECISIONS {
-            assert!(!decision_label(decision).is_empty(), "{decision} has no label");
-        }
-        // The service refuses anything outside the four, so the shell offers
-        // nothing else and shows no label for it.
-        assert_eq!(APPROVAL_DECISIONS.len(), 4);
-        assert_eq!(decision_label("allow_forever"), "");
     }
 
     #[test]

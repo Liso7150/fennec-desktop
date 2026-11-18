@@ -51,6 +51,11 @@ struct HistoryTimeline {
     messages: Vec<HistoryMessage>,
     summary: String,
     status: String,
+    /// The files the run wrote, as (path, verb). Both desktop binaries share one
+    /// history file, and only the gpui shell draws the delivery cards — saving
+    /// them here is what stops this binary from erasing the other's evidence.
+    #[serde(default)]
+    delivered: Vec<(String, String)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -60,14 +65,16 @@ struct HistoryMessage {
     time: String,
 }
 
-// Fennec Night: warm charcoal ground, terracotta primary, no blue anywhere.
-const BG: egui::Color32 = egui::Color32::from_rgb(21, 18, 15);
-const PANEL: egui::Color32 = egui::Color32::from_rgb(27, 23, 20);
-const SURFACE: egui::Color32 = egui::Color32::from_rgb(40, 33, 26);
-const HOVER: egui::Color32 = egui::Color32::from_rgb(53, 34, 24);
-const BORDER: egui::Color32 = egui::Color32::from_rgb(60, 50, 42);
-const TEXT: egui::Color32 = egui::Color32::from_rgb(242, 238, 232);
-const TEXT2: egui::Color32 = egui::Color32::from_rgb(169, 157, 145);
+// Fennec Night: graphite ground, terracotta primary. The neutral ramp matches the
+// shared `Dark` preset in fennec-ui (hsl 0/0/8, 12, 18) and the coding-agent PWA,
+// so all three surfaces sit on the same grey instead of drifting warm.
+const BG: egui::Color32 = egui::Color32::from_rgb(20, 20, 20);
+const PANEL: egui::Color32 = egui::Color32::from_rgb(25, 25, 25);
+const SURFACE: egui::Color32 = egui::Color32::from_rgb(31, 31, 31);
+const HOVER: egui::Color32 = egui::Color32::from_rgb(42, 42, 42);
+const BORDER: egui::Color32 = egui::Color32::from_rgb(46, 46, 46);
+const TEXT: egui::Color32 = egui::Color32::from_rgb(237, 237, 237);
+const TEXT2: egui::Color32 = egui::Color32::from_rgb(160, 160, 160);
 const BRAND: egui::Color32 = egui::Color32::from_rgb(233, 134, 93);
 const OK: egui::Color32 = egui::Color32::from_rgb(94, 201, 143);
 const WARN: egui::Color32 = egui::Color32::from_rgb(224, 164, 88);
@@ -813,6 +820,10 @@ impl App {
                         TaskStatus::Waiting => "Waiting",
                         TaskStatus::AwaitingApproval => "AwaitingApproval",
                     }.to_string(),
+                    delivered: tl.tools.iter()
+                        .filter(|c| c.category == "EDIT" && c.status != ToolStatus::Running && c.status != ToolStatus::Failed)
+                        .filter_map(|c| Some((c.path.clone()?, fennec_ui::attention::delivery_verb_from_title(&c.title)?.to_string())))
+                        .collect(),
                 })
             }).collect(),
             seen_at: self.seen_at.clone(),
@@ -951,7 +962,7 @@ impl App {
             if attention_count > 0 {
                 ui.add_space(4.0);
                 egui::Frame::default().fill(BRAND).corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| {
-                    ui.label(egui::RichText::new(attention_count.to_string()).size(10.0).color(egui::Color32::from_rgb(34, 18, 13)).strong());
+                    ui.label(egui::RichText::new(attention_count.to_string()).size(10.0).color(egui::Color32::from_rgb(20, 20, 20)).strong());
                 });
             }
         });
@@ -1230,7 +1241,7 @@ impl App {
                         } else {
                             format!("{MOD_HINT}+Enter sends")
                         };
-                        if ui.add_enabled(enabled, egui::Button::new(egui::RichText::new("Send  ↑").color(egui::Color32::from_rgb(34, 18, 13))).fill(BRAND))
+                        if ui.add_enabled(enabled, egui::Button::new(egui::RichText::new("Send  ↑").color(egui::Color32::from_rgb(20, 20, 20))).fill(BRAND))
                             .on_hover_text(hint).clicked() {
                             send_now = true;
                         }
@@ -1407,9 +1418,9 @@ impl App {
                     }
                     ui.label(egui::RichText::new(&card.detail).monospace().size(11.0).color(TEXT2));
                     ui.horizontal(|ui| {
-                        for decision in events::APPROVAL_DECISIONS {
+                        for decision in fennec_ui::attention::APPROVAL_DECISIONS {
                             let response = ui.add_enabled(live, egui::Button::new(
-                                egui::RichText::new(events::decision_label(decision)).size(11.5)));
+                                egui::RichText::new(fennec_ui::attention::decision_label(decision)).size(11.5)));
                             if response.clicked() {
                                 answer = Some((card.id.clone(), (*decision).to_string()));
                             }
@@ -1422,7 +1433,7 @@ impl App {
                         events::ApprovalState::Answered => {
                             // Not a claim that the call did anything: the tool
                             // card below carries its result.
-                            ui.label(egui::RichText::new(format!("answer sent · {}", events::decision_label(&card.decision)))
+                            ui.label(egui::RichText::new(format!("answer sent · {}", fennec_ui::attention::decision_label(&card.decision)))
                                 .size(10.5).color(OK));
                         }
                         events::ApprovalState::Expired => {
@@ -2368,6 +2379,7 @@ mod tests {
                 updated: "now".into(),
                 goal: String::new(),
                 draft: false,
+                workspace_id: None,
             });
         }
         app.selected = "s1".into();
@@ -2515,7 +2527,7 @@ mod tests {
         let mut app = App::new();
         app.tasks.push(Task { id: "s9".into(), title: "fix the flake".into(),
             status: TaskStatus::Complete, updated: String::new(),
-            goal: "fix the flake".into(), draft: false });
+            goal: "fix the flake".into(), draft: false, workspace_id: None });
         app.selected = "s9".into();
         app.replay_history();
         let tl = app.timelines.get("s9").expect("selecting a task opens its timeline");
