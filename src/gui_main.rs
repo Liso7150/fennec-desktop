@@ -1671,19 +1671,19 @@ impl App {
                         div().flex().items_center().gap_1().px_1().py_0p5().rounded_md()
                             .when(is_selected, |d| d.bg(t.muted.clone()))
                             .child(Button::new(format!("task-sel-{}", id)).ghost().small().flex_1().justify_start()
-                                .child(div().flex().items_center().gap_2()
+                                .child(div().flex().items_center().gap_2().overflow_hidden()
                                     .child(div().w(px(6.0)).h(px(6.0)).flex_shrink_0().rounded_full().bg(status_color(&t, status)))
                                     .child(Label::new(title).text_size(px(12.0)).truncate()))
                                 .on_click(cx.listener(move |a, _, _, cx| {
                                     a.selected = id.clone();
                                     cx.notify();
                                 })))
-                            .child(Button::new(format!("task-rename-{}", id_rename)).ghost().small().px_1()
+                            .child(Button::new(format!("task-rename-{}", id_rename)).ghost().small().px_1().flex_shrink_0()
                                 .child(Label::new("✎").text_size(px(12.0)).text_color(t.muted_foreground))
                                 .on_click(cx.listener(move |a, _, window, cx| {
                                     a.start_rename(&id_rename, window, cx);
                                 })))
-                            .child(Button::new(format!("task-del-{}", id_del)).ghost().small().px_1()
+                            .child(Button::new(format!("task-del-{}", id_del)).ghost().small().px_1().flex_shrink_0()
                                 .child(Label::new("×").text_size(px(13.0)).text_color(t.red))
                                 .on_click(cx.listener(move |a, _, _, cx| {
                                     a.delete_task(&id_del);
@@ -1711,19 +1711,19 @@ impl App {
                     div().flex().items_center().gap_1().px_1().py_0p5().rounded_md()
                         .when(is_selected, |d| d.bg(t.muted.clone()))
                         .child(Button::new(format!("task-sel2-{}", id)).ghost().small().flex_1().justify_start()
-                            .child(div().flex().items_center().gap_2()
+                            .child(div().flex().items_center().gap_2().overflow_hidden()
                                 .child(div().w(px(6.0)).h(px(6.0)).flex_shrink_0().rounded_full().bg(status_color(&t, status)))
                                 .child(Label::new(title).text_size(px(12.0)).truncate()))
                             .on_click(cx.listener(move |a, _, _, cx| {
                                 a.selected = id.clone();
                                 cx.notify();
                             })))
-                        .child(Button::new(format!("task-rename2-{}", id_rename)).ghost().small().px_1()
+                        .child(Button::new(format!("task-rename2-{}", id_rename)).ghost().small().px_1().flex_shrink_0()
                             .child(Label::new("✎").text_size(px(12.0)).text_color(t.muted_foreground))
                             .on_click(cx.listener(move |a, _, window, cx| {
                                 a.start_rename(&id_rename, window, cx);
                             })))
-                        .child(Button::new(format!("task-del2-{}", id_del)).ghost().small().px_1()
+                        .child(Button::new(format!("task-del2-{}", id_del)).ghost().small().px_1().flex_shrink_0()
                             .child(Label::new("×").text_size(px(13.0)).text_color(t.red))
                             .on_click(cx.listener(move |a, _, _, cx| {
                                 a.delete_task(&id_del);
