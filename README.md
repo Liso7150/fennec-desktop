@@ -24,7 +24,7 @@ binary, and a release build of it needs `fxc.exe` from the Windows SDK to compil
 
 | UI | Backend | Compaction | Tests | Platforms |
 |---|---|---|---|---|
-| native window, gpui-kit (`gui` feature) | agent server `127.0.0.1:8787`, engine SSE `127.0.0.1:8184` | `fennec-economy`, in-process | 33 | Windows, macOS, Linux |
+| native window, gpui-kit (`gui` feature) | agent server `127.0.0.1:8787`, engine SSE `127.0.0.1:8184` | `fennec-economy`, in-process | 47 | Windows, macOS, Linux |
 
 ## Architecture
 
@@ -73,7 +73,7 @@ The app path-depends on the sibling `fennec-core` checkout, so fetch the repos t
 ```bash
 cargo build  --features gui --offline  # ./target/debug/fennec-desktop-gui(.exe)
 cargo build  --release --features gui --offline   # needs fxc.exe on Windows
-cargo test   --release --offline       # 37 tests
+cargo test --offline --features gui                   # 47 tests
 ```
 
 The engine and the agent server start independently of the app; the Environment panel offers

@@ -154,7 +154,7 @@ pub async fn check_stable(current_version: &str) -> Result<Option<Release>, Stri
 /// Check for experimental updates from main branch
 pub async fn check_experimental() -> Result<Option<Release>, String> {
     let url = format!(
-        "https://api.github.com/repos/{}/commits/master",
+        "https://api.github.com/repos/{}/commits/main",
         GITHUB_REPO
     );
     let client = reqwest::Client::builder()

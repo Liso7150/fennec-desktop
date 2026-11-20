@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/Liso7150/fennec-desktop"
-description = "Fennec desktop: a native Rust coding-agent workspace. UI and glue only — the backend protocols come from fennec-core's fennec-client crate, context budgeting from fennec-economy, and the suite layout from fennec-environment-setup's repos.json manifest. Ships the egui binary and the gpui-kit GUI binary."
+description = "Fennec desktop: a native Rust coding-agent workspace. UI and glue only — the backend protocols come from fennec-core's fennec-client crate, context budgeting from fennec-economy, and the suite layout from fennec-environment-setup's repos.json manifest. The desktop app is the gpui-kit binary fennec-desktop-gui; the egui binary fennec-desktop is the shell it replaced, kept buildable for A/B."
 
 [[bin]]
 name = "fennec-desktop"
@@ -37,6 +37,9 @@ rfd = "0.15"
 base64 = "0.22"
 cpal = "0.15"
 hound = "3.5"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
 
 [features]
 default = []

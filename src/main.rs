@@ -14,7 +14,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 use eframe::egui;
 use fennec_client::engine::{ChatDelta, Engine};
-use fennec_client::{git, suite, Core, Outlet};
+use fennec_client::{git, outlet_rows, suite, Core, Outlet};
 use fennec_desktop::events::{self, ChatMessage, Event, Role, Task, TaskStatus, Timeline, ToolStatus};
 use fennec_desktop::fonts;
 use serde::{Deserialize, Serialize};
@@ -453,6 +453,14 @@ impl App {
     fn drain(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
+                UiEvent::Task(id, events::Event::Queued(items)) => {
+                    // The loop's follow-ups for a complex run land in the same
+                    // queue the user's own prompts use, so they drain the same way.
+                    for text in items {
+                        self.task_queue.push(QueuedTask { id: id.clone(), text,
+                                                          queued_at: std::time::Instant::now() });
+                    }
+                }
                 UiEvent::Task(id, e) => {
                     let before = self.timelines.get(&id).map(|t| t.status);
                     let tl = self.timelines.entry(id.clone()).or_default();
@@ -647,7 +655,7 @@ impl App {
             }
             let workspace = self.workspace();
             match self.core.start(&text, &workspace, self.allow_write, self.allow_shell,
-                                  self.allow_web, self.ask_each) {
+                                  self.allow_web, self.ask_each, "auto") {
                 Ok(id) => {
                     let tl = self.tl(&id);
                     tl.messages.push(ChatMessage { role: Role::User, text: text.clone(), time: events::now_stamp() });
@@ -1172,6 +1180,22 @@ impl App {
                 });
             });
 
+            // The browser agents, one row each in core's own order. The wording is
+            // the crate's (`fennec_client::outlet_rows`), so this shell, the gpui
+            // one and the PWA cannot each invent their own sentence for the same
+            // probe — and a loop that never answered says "unknown", not three
+            // "not installed"s.
+            for (installed, key, detail) in outlet_rows(self.env.outlets_known, &self.env.outlets) {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(key).size(11.0).color(TEXT2));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(detail).monospace().size(10.0)
+                            .color(if installed { OK } else { TEXT2 }));
+                    });
+                });
+            }
+
             ui.add_space(12.0);
             ui.separator();
 
@@ -1449,6 +1473,10 @@ impl App {
             let mut toggle: Option<String> = None;
             for card in &tl.tools {
                 let open = self.expanded.contains(&card.id);
+                // What the call says it is doing while it is still blocked. One
+                // line, replaced by the next report of it, and only on a card that
+                // is actually running — the loop's own words, never cut here.
+                let progress = tl.progress_of(&card.id);
                 egui::Frame::default().fill(SURFACE).corner_radius(RADIUS).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
                     ui.push_id(&card.id, |ui| {
                         ui.horizontal(|ui| {
@@ -1470,6 +1498,9 @@ impl App {
                                 ui.colored_label(tool_color(card.status), format!("● {}", card.status.label()));
                             });
                         });
+                        if let Some(line) = &progress {
+                            ui.label(egui::RichText::new(line).size(11.5).color(TEXT2));
+                        }
                         // Only show detail and output when expanded
                         if open {
                             ui.label(egui::RichText::new(&card.detail).monospace().size(11.0).color(TEXT2));
@@ -1965,20 +1996,6 @@ fn time_ago(stamp: &str) -> String {
     }
 }
 
-/// One `(installed, line)` row per outlet the agent server reported. The three
-/// states are three different claims: never probed, probed but empty, and
-/// probed with real data — so an offline loop can never read as "not installed".
-#[cfg(test)]
-fn outlet_rows(env: &Env) -> Vec<(bool, String)> {
-    if !env.outlets_known {
-        return vec![(false, "Outlets: unknown (agent loop offline)".into())];
-    }
-    if env.outlets.is_empty() {
-        return vec![(false, "Outlets: the agent server named none".into())];
-    }
-    env.outlets.iter().map(|o| (o.present, format!("{}: {}", o.label, o.detail))).collect()
-}
-
 /// What the engine itself said about images, in whichever spelling it uses: a
 /// `vision` flag (the Fennec engine declares `false`) or an `input_modalities`
 /// list (a Colibri server lists `image`). `None` is the engine staying silent,
@@ -2163,17 +2180,6 @@ mod tests {
     }
 
     #[test]
-    fn the_outlet_rail_keeps_not_probed_apart_from_probed_empty() {
-        assert_eq!(outlet_rows(&Env::default()), vec![(false, "Outlets: unknown (agent loop offline)".to_string())]);
-        let mut env = Env::default();
-        env.outlets_known = true;
-        assert_eq!(outlet_rows(&env), vec![(false, "Outlets: the agent server named none".to_string())]);
-        env.outlets = vec![Outlet { id: "jev", label: "Jev", present: false,
-                                    detail: "not installed".into(), agents: Vec::new() }];
-        assert_eq!(outlet_rows(&env), vec![(false, "Jev: not installed".to_string())]);
-    }
-
-    #[test]
     fn the_engine_answers_for_images_in_whichever_spelling_it_uses() {
         use serde_json::json;
         assert_eq!(engine_vision(&json!({"status": "ok", "vision": false})), Some(false));
@@ -2310,6 +2316,7 @@ mod tests {
             started_t: 0.4,
             duration: "1.1 s".into(),
             after: 0,
+            progress: None,
         }));
         tl.apply(Event::Plan(vec![
             PlanEntry { content: "Inspect the workspace".into(), done: true },

@@ -2125,7 +2125,9 @@ name = "fennec-desktop"
 version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "cpal",
+ "dirs 5.0.1",
  "eframe",
  "fennec-client",
  "fennec-economy",
@@ -2140,6 +2142,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

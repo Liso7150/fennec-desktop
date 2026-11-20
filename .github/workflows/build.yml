@@ -53,7 +53,10 @@ jobs:
             libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
       - name: Test
         working-directory: fennec-desktop
-        run: cargo test --release
+        # `--features gui` because the gpui binary is `required-features = ["gui"]`:
+        # without the flag cargo skips that target, so the shell users actually run
+        # would be built but never tested.
+        run: cargo test --release --features gui
       # The `gui` feature is what users run: fennec-desktop-gui is the current
       # shell. Its release build compiles shaders with fxc.exe, which the SDK on
       # these runners provides and a bare dev box usually does not.

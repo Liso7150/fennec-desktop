@@ -2,7 +2,7 @@
 //! agent-loop steps and engine chat deltas are plain JSON, and this module
 //! turns them into timeline state — an interpretation only a client does.
 
-use fennec_ui::attention::{args_line, clip, path_of, risk_word as risk_of};
+use fennec_ui::attention::{args_line, clip, looks_like_call, path_of, risk_word as risk_of};
 use serde_json::Value;
 
 /// One tool-activity card, keyed by the loop's `call_id` so the `tool_start`
@@ -29,6 +29,10 @@ pub struct ToolEvent {
     /// puts the call in the stretch between two answers, and so in that
     /// stretch's block.
     pub after: usize,
+    /// What the call has said it is doing, once it is still blocked long enough
+    /// to say something. The newest report wins; a call that never reported one
+    /// shows nothing beyond its Running state.
+    pub progress: Option<ProgressLine>,
 }
 
 #[derive(Clone, Copy, PartialEq, Default, Debug)]
@@ -173,6 +177,27 @@ impl TaskStatus {
     }
 }
 
+/// One in-flight call's live line, as the loop last reported it. `text` is the
+/// backend's own sentence and reaches the user unchanged; the meter is kept
+/// beside it so a surface can dim the count apart from the words.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProgressLine {
+    pub text: String,
+    pub step: Option<u64>,
+    pub of: Option<u64>,
+}
+
+impl ProgressLine {
+    /// The whole line as the user reads it: the sentence, then the dim `3/12`
+    /// when the loop counted both halves.
+    pub fn line(&self) -> String {
+        match (self.step, self.of) {
+            (Some(s), Some(o)) => format!("{} {}/{}", self.text, s, o),
+            _ => self.text.clone(),
+        }
+    }
+}
+
 /// A row in the left rail: a real agent session, or a local draft chat task.
 #[derive(Clone)]
 pub struct Task {
@@ -196,6 +221,14 @@ pub enum Event {
     Status(TaskStatus),
     Cancelled,
     Approval(Approval),
+    /// Follow-up prompts the loop queued for a complex run. Not timeline
+    /// content: the shell owns the queue the user sees.
+    Queued(Vec<String>),
+    /// What one in-flight call says it is doing, as the loop put it: its own
+    /// sentence and, when it counted, the position within that count. Not a
+    /// timeline event — the card the `tool_start` opened carries it, and the
+    /// next report of the same call replaces it.
+    Progress { id: String, text: String, step: Option<u64>, of: Option<u64> },
 }
 
 /// Everything the center pane shows for one task. Built only from events the
@@ -240,6 +273,13 @@ impl Timeline {
                         if finished && card.status == ToolStatus::Running {
                             card.duration = format!("{:.1}s", (t.started_t - card.started_t).max(0.0));
                         }                        card.status = t.status;
+                        // What the call said while it was blocked was its own
+                        // report of the present tense; the result replaces it, so
+                        // a settled card carries no line — and a fold that keys
+                        // "still running" off one would never close.
+                        if finished {
+                            card.progress = None;
+                        }
                         if !t.output.is_empty() {
                             card.output = t.output;
                         }
@@ -267,7 +307,11 @@ impl Timeline {
             Event::Approval(a) => match self.approvals.iter_mut().find(|c| c.id == a.id) {
                 // One question, one card: a step that repeats an id updates the
                 // card it opened rather than adding a second way to answer it.
-                Some(card) => *card = a,
+                // Only while the card is still open — a step that arrives after
+                // the user answered, or after the question died, must not hand
+                // the buttons back.
+                Some(card) if card.state == ApprovalState::Pending => *card = a,
+                Some(_) => {}
                 None => self.approvals.push(a),
             },
             Event::Summary(s) => {
@@ -276,6 +320,21 @@ impl Timeline {
                 self.summary = s;
             }
             Event::Status(st) => self.status = st,
+            // A queued follow-up is the shell's task queue, not this timeline:
+            // `App::drain` moves it there before the timeline is asked to apply
+            // anything, so a run's own record stays free of queue bookkeeping.
+            Event::Queued(_) => {}
+            // The line belongs to the card its `tool_start` opened, so a report
+            // about a call this timeline never saw is dropped rather than making
+            // a card of its own. A settled card keeps no line: whatever it said
+            // while it ran is not what it delivered.
+            Event::Progress { id, text, step, of } => {
+                if let Some(card) = self.tools.iter_mut().find(|c| c.id == id) {
+                    if card.status == ToolStatus::Running {
+                        card.progress = Some(ProgressLine { text, step, of });
+                    }
+                }
+            }
             Event::Cancelled => {
                 self.streaming = false;
                 for card in &mut self.tools {
@@ -361,6 +420,17 @@ impl Timeline {
             || !self.approvals.is_empty()
             || !self.summary.is_empty()
     }
+
+    /// What a call the run is still inside last said about itself, as one line:
+    /// the loop's own sentence with its meter. `None` when the card settled or
+    /// never reported — a surface draws nothing then, which is what it drew
+    /// before a long call learned to talk.
+    pub fn progress_of(&self, id: &str) -> Option<String> {
+        self.tools.iter().find(|c| c.id == id)
+            .filter(|c| c.status == ToolStatus::Running)
+            .and_then(|c| c.progress.as_ref())
+            .map(ProgressLine::line)
+    }
 }
 
 /// The loop's tool names → the card's badge and human title. The table lives in
@@ -413,7 +483,13 @@ pub fn map_step(step: &Value) -> Vec<Event> {
                 out.push(Event::Message(ChatMessage { role: Role::Progress, text: reasoning.to_string(), time: stamp() }));
             }
             let content = step["content"].as_str().unwrap_or("").trim();
-            if !content.is_empty() {
+            // The loop publishes each tool spelling the model wrote as text as
+            // its own assistant step, and a turn that does not land a call
+            // spells the same blob again. As an answer that is the same JSON
+            // object over and over; the call's own row says what ran, so the
+            // blob never becomes a message here.
+            if !content.is_empty() && !looks_like_call(content,
+                    step["tool_calls"].as_array().is_some_and(|c| !c.is_empty())) {
                 out.push(Event::Message(ChatMessage { role: Role::Assistant, text: content.to_string(), time: stamp() }));
             }
             out
@@ -435,7 +511,8 @@ pub fn map_step(step: &Value) -> Vec<Event> {
                 started_t: t,
                 duration: String::new(),
                 after: 0,
-            })]
+            progress: None,
+})]
         }
         "tool" => {
             let name = step["name"].as_str().unwrap_or("tool");
@@ -454,7 +531,8 @@ pub fn map_step(step: &Value) -> Vec<Event> {
                 started_t: t,
                 duration: String::new(),
                 after: 0,
-            })]
+            progress: None,
+})]
         }
         "approval_required" => {
             let id = step["approval_id"].as_str().unwrap_or("");
@@ -482,17 +560,48 @@ pub fn map_step(step: &Value) -> Vec<Event> {
             })]
         }
         "plan" => vec![Event::Plan(plan_entries(&step["entries"]))],
+        // What a call still blocked says about itself. The words are the loop's
+        // and travel unchanged; the two counters come along so the surface can
+        // put a meter beside them. A report with no call to belong to, or with
+        // nothing to say, is not an event at all — see `progress_without_a_call_
+        // or_a_sentence_is_dropped`.
+        "progress" => {
+            let id = step["call_id"].as_str().unwrap_or("");
+            let text = match step["text"].as_str() {
+                Some(t) => t.to_string(),
+                None => return Vec::new(),
+            };
+            if id.is_empty() || text.is_empty() {
+                return Vec::new();
+            }
+            vec![Event::Progress {
+                id: id.to_string(),
+                text,
+                step: positive_field(step, "step"),
+                of: positive_field(step, "of"),
+            }]
+        }
         "final" => vec![
             Event::Summary(step["content"].as_str().unwrap_or("Task finished.").to_string()),
             Event::Status(TaskStatus::Complete),
         ],
         "cancelled" => vec![Event::Cancelled],
+        "queue" => vec![Event::Queued(step["items"].as_array().map(|list| {
+            list.iter().filter_map(Value::as_str).map(str::to_string).collect()
+        }).unwrap_or_default())],
         "error" => vec![
             Event::Message(ChatMessage { role: Role::Progress, text: format!("Agent loop error: {}", step["content"].as_str().unwrap_or("")), time: stamp() }),
             Event::Status(TaskStatus::NeedsAttention),
         ],
         _ => Vec::new(),
     }
+}
+
+/// A position the loop counted: a positive integer under this key, and nothing
+/// else. A float, a numeral spelled as text or a zero means the step did not
+/// count, so no meter is drawn for it.
+fn positive_field(step: &Value, key: &str) -> Option<u64> {
+    step[key].as_u64().filter(|n| *n > 0)
 }
 
 /// The loop's own plan list, read straight off its `plan` step. Nothing here
@@ -574,11 +683,29 @@ mod tests {
         assert!(map_step(&json!({})).is_empty());
     }
 
+    /// The follow-ups a complex run leaves behind reach this shell as prompts,
+    /// in order, which is what its task queue holds.
+    #[test]
+    fn a_queue_step_carries_its_items() {
+        let step = json!({"type": "queue", "t": 4.0,
+                          "items": ["Add the drain test", "Refresh the docs"]});
+        match map_step(&step).as_slice() {
+            [Event::Queued(items)] => assert_eq!(items,
+                &["Add the drain test".to_string(), "Refresh the docs".to_string()]),
+            other => panic!("one queue event expected, got {} events", other.len()),
+        }
+        match map_step(&json!({"type": "queue", "items": []})).as_slice() {
+            [Event::Queued(items)] => assert!(items.is_empty()),
+            other => panic!("one queue event expected, got {} events", other.len()),
+        }
+    }
+
     /// `loop.py:STEP_TYPES`, copied here as the contract this shell has to
     /// cover. `loop.py` owns the list; a type added there without an arm here
     /// would make this shell go silent on part of a live run.
-    const LOOP_STEP_TYPES: [&str; 9] = ["plan", "assistant", "partial", "tool_start", "tool",
-                                        "final", "error", "cancelled", "approval_required"];
+    const LOOP_STEP_TYPES: [&str; 11] = ["plan", "assistant", "partial", "tool_start", "tool",
+                                         "queue", "final", "error", "cancelled",
+                                         "approval_required", "progress"];
 
     #[test]
     fn every_step_type_the_loop_declares_has_an_arm_here() {
@@ -588,6 +715,8 @@ mod tests {
                 "tool_start" => json!({"name": "read_file", "args": {}, "call_id": "c1"}),
                 "tool" => json!({"name": "read_file", "args": {}, "call_id": "c1",
                                  "ok": true, "result": {}}),
+                "progress" => json!({"name": "web_task", "call_id": "c1",
+                                     "text": "Deciding step 3 of 12", "step": 3, "of": 12}),
                 "approval_required" => json!({"approval_id": "a1", "name": "write_file",
                                               "args": {"path": "n.md"}, "risk": "medium",
                                               "reason": "replaces a file in the workspace"}),
@@ -597,6 +726,96 @@ mod tests {
             step["type"] = json!(kind);
             assert!(!map_step(&step).is_empty(), "{kind} has no arm in map_step");
         }
+    }
+
+    /// The contract a long-running call reports against: its sentence, verbatim,
+    /// with the counters beside it, and nothing else about it.
+    fn progress(step: Value) -> ProgressLine {
+        match map_step(&step).as_slice() {
+            [Event::Progress { id, text, step, of }] => {
+                assert_eq!(id, "call_7");
+                ProgressLine { text: text.clone(), step: *step, of: *of }
+            }
+            other => panic!("one progress event expected, got {} events", other.len()),
+        }
+    }
+
+    #[test]
+    fn a_progress_step_carries_the_loops_sentence_and_its_counts() {
+        let line = progress(json!({"type": "progress", "name": "web_task", "call_id": "call_7",
+                                   "text": "Deciding step 3 of 12", "step": 3, "of": 12,
+                                   "i": 7, "t": 41.2}));
+        assert_eq!(line.text, "Deciding step 3 of 12");
+        assert_eq!((line.step, line.of), (Some(3), Some(12)));
+        assert_eq!(line.line(), "Deciding step 3 of 12 3/12");
+        // A sentence is not cut or re-cased on the way through, however long it is.
+        let long = "x".repeat(900);
+        assert_eq!(progress(json!({"type": "progress", "call_id": "call_7", "text": &long})).text, long);
+        // Either counter may be absent, and then there is no meter to draw.
+        let alone = progress(json!({"type": "progress", "call_id": "call_7", "text": "Typing", "step": 4}));
+        assert_eq!((alone.step, alone.of, alone.line().as_str()), (Some(4), None, "Typing"));
+        // A counter that is not a positive integer said nothing about a position.
+        for junk in [json!(0), json!(-2), json!(1.5), json!("3"), json!(null), json!(true)] {
+            let l = progress(json!({"type": "progress", "call_id": "call_7", "text": "Waiting",
+                                    "step": junk.clone(), "of": 12}));
+            assert_eq!(l.step, None, "for {junk}");
+            assert_eq!(l.line(), "Waiting");
+        }
+    }
+
+    /// A `progress` step belongs to a card. One that names no call, or brings no
+    /// sentence, is ignored rather than turned into an error row.
+    #[test]
+    fn a_progress_step_with_nothing_to_say_or_nobody_to_say_it_about_is_dropped() {
+        for orphan in [
+            json!({"type": "progress", "text": "no call id"}),
+            json!({"type": "progress", "call_id": "", "text": "empty call id"}),
+            json!({"type": "progress", "call_id": "c1"}),
+            json!({"type": "progress", "call_id": "c1", "text": null}),
+            json!({"type": "progress", "call_id": "c1", "text": 7}),
+            json!({"type": "progress", "call_id": "c1", "text": ["a list"]}),
+            json!({"type": "progress", "call_id": "c1", "text": ""}),
+        ] {
+            assert!(map_step(&orphan).is_empty(), "{orphan} should be ignored");
+        }
+    }
+
+    /// The line lives on the card its `tool_start` opened: one visible report per
+    /// call, replaced by the next, and gone from the timeline's counted rows.
+    #[test]
+    fn a_newer_report_replaces_the_line_on_its_own_card() {
+        let mut tl = Timeline::default();
+        for e in map_step(&json!({"type": "tool_start", "t": 1.0, "name": "web_task",
+                                  "call_id": "call_7", "args": {"goal": "book it"}})) {
+            tl.apply(e);
+        }
+        for e in map_step(&json!({"type": "progress", "name": "web_task", "call_id": "call_7",
+                                  "text": "Deciding step 3 of 12", "step": 3, "of": 12})) {
+            tl.apply(e);
+        }
+        assert_eq!(tl.tools.len(), 1, "a report does not open a second card");
+        assert_eq!(tl.tools[0].progress.as_ref().unwrap().line(), "Deciding step 3 of 12 3/12");
+        for e in map_step(&json!({"type": "progress", "name": "web_task", "call_id": "call_7",
+                                  "text": "Typing into the search box"})) {
+            tl.apply(e);
+        }
+        assert_eq!(tl.tools.len(), 1);
+        assert_eq!(tl.tools[0].progress.as_ref().unwrap().line(), "Typing into the search box");
+        // The card stays as live as the call it stands for: a report neither
+        // settles nor folds it.
+        assert_eq!(tl.tools[0].status, ToolStatus::Running);
+        // And a report about a call this timeline never saw opens nothing.
+        for e in map_step(&json!({"type": "progress", "call_id": "elsewhere", "text": "Stranded"})) {
+            tl.apply(e);
+        }
+        assert_eq!(tl.tools.len(), 1);
+        // The result closes the card and its line goes with the running state.
+        for e in map_step(&json!({"type": "tool", "t": 41.0, "name": "web_task", "call_id": "call_7",
+                                  "ok": true, "args": {}, "result": {"done": true}})) {
+            tl.apply(e);
+        }
+        assert_eq!(tl.tools[0].status, ToolStatus::Complete);
+        assert!(tl.tools[0].progress.is_none());
     }
 
     /// What `loop.request_approval` publishes for the gated call in the PWA's
@@ -733,7 +952,7 @@ mod tests {
     #[test]
     fn cancelled_run_warns_on_open_cards() {
         let mut tl = Timeline::default();
-        tl.apply(Event::Tool(ToolEvent { id: "c1".into(), category: "CMD".into(), title: "t".into(), status: ToolStatus::Running, detail: String::new(), output: String::new(), path: None, exit: None, started_t: 0.0, after: 0, duration: String::new() }));
+        tl.apply(Event::Tool(ToolEvent { id: "c1".into(), category: "CMD".into(), title: "t".into(), status: ToolStatus::Running, detail: String::new(), output: String::new(), path: None, exit: None, started_t: 0.0, after: 0, duration: String::new(), progress: None, }));
         tl.apply(Event::Cancelled);
         assert_eq!(tl.tools[0].status, ToolStatus::Warning);
         assert_eq!(tl.status, TaskStatus::Waiting);
@@ -750,9 +969,9 @@ mod tests {
     #[test]
     fn artifacts_come_from_edit_cards_only() {
         let mut tl = Timeline::default();
-        tl.apply(Event::Tool(ToolEvent { id: "a".into(), category: "EDIT".into(), title: "Write file src/x.py".into(), status: ToolStatus::Complete, detail: String::new(), output: "+1".into(), path: Some("src/x.py".into()), exit: None, started_t: 0.0, after: 0, duration: "0.1s".into() }));
-        tl.apply(Event::Tool(ToolEvent { id: "b".into(), category: "READ".into(), title: "Read file src/y.py".into(), status: ToolStatus::Complete, detail: String::new(), output: String::new(), path: Some("src/y.py".into()), exit: None, started_t: 0.0, after: 0, duration: "0.1s".into() }));
-        tl.apply(Event::Tool(ToolEvent { id: "c".into(), category: "EDIT".into(), title: "Edit file notes/todo list.md".into(), status: ToolStatus::Complete, detail: String::new(), output: "~1".into(), path: Some("notes/todo list.md".into()), exit: None, started_t: 0.0, after: 0, duration: "0.1s".into() }));
+        tl.apply(Event::Tool(ToolEvent { id: "a".into(), category: "EDIT".into(), title: "Write file src/x.py".into(), status: ToolStatus::Complete, detail: String::new(), output: "+1".into(), path: Some("src/x.py".into()), exit: None, started_t: 0.0, after: 0, duration: "0.1s".into(), progress: None, }));
+        tl.apply(Event::Tool(ToolEvent { id: "b".into(), category: "READ".into(), title: "Read file src/y.py".into(), status: ToolStatus::Complete, detail: String::new(), output: String::new(), path: Some("src/y.py".into()), exit: None, started_t: 0.0, after: 0, duration: "0.1s".into(), progress: None, }));
+        tl.apply(Event::Tool(ToolEvent { id: "c".into(), category: "EDIT".into(), title: "Edit file notes/todo list.md".into(), status: ToolStatus::Complete, detail: String::new(), output: "~1".into(), path: Some("notes/todo list.md".into()), exit: None, started_t: 0.0, after: 0, duration: "0.1s".into(), progress: None, }));
         let arts = tl.artifacts();
         assert_eq!(arts.len(), 2);
         assert_eq!(arts[0].name, "src/x.py");
