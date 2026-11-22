@@ -618,7 +618,7 @@ enum BackendResponse {
     ServeState { core_up: bool, core_root: String, axum: bool, engine: EngineState,
                  branch: String, outlets: Vec<Outlet>, outlets_known: bool },
     Core(CoreEvent),
-    Stt(String),
+    Stt(Result<String, String>),
 }
 
 /// What the inference engine reports about itself. `vision` is `None` when the
@@ -1119,10 +1119,23 @@ impl App {
     fn poll_responses(&mut self, cx: &mut Context<Self>) {
         while let Ok(resp) = self.response_rx.try_recv() {
             match resp {
-                BackendResponse::Stt(text) => {
+                BackendResponse::Stt(result) => {
                     self.stt_recording = false;
                     self.line = String::new();
-                    if !text.is_empty() { self.composer_restore = Some(text); }
+                    match result {
+                        Ok(text) if text.is_empty() => self.toast("Didn't catch any words.", false),
+                        Ok(text) => {
+                            // Dictation extends what the user already typed, the
+                            // same way the PWA composer does; a replaced value
+                            // silently deletes the prompt half-written.
+                            let prior = self.composer.read(cx).value().to_string();
+                            let sep = if prior.is_empty()
+                                || prior.chars().last().map_or(false, |c| c.is_whitespace())
+                            { "" } else { " " };
+                            self.composer_restore = Some(format!("{prior}{sep}{text}"));
+                        }
+                        Err(e) => self.toast(format!("Speech recognition failed: {e}"), false),
+                    }
                 }
                 BackendResponse::BackendInfo { names } => {
                     self.agents = names;
@@ -1617,12 +1630,32 @@ impl App {
         let stop = self.stt_stop.clone();
         let buffer = self.stt_buffer.clone();
         let rate_arc = self.stt_rate.clone();
+        let core_base = self.core.base.clone();
         let tx = self.response_tx.clone();
         std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) { std::thread::sleep(std::time::Duration::from_millis(50)); }
             let samples = buffer.lock().unwrap().clone();
             let rate = rate_arc.load(Ordering::Relaxed);
-            let text = fennec_ui::controls::transcribe_samples(&samples, rate);
+            // Whisper answers an empty clip with HTTP 200 and no text, so without
+            // this the user sees "Didn't catch any words" for a muted or wrong
+            // input device and blames the recogniser.
+            let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+            if peak < 0.001 {
+                let _ = tx.send(BackendResponse::Stt(Err(format!(
+                    "the microphone captured silence ({} samples at {} Hz, peak {peak:.5}) — check the input device and its volume",
+                    samples.len(), rate))));
+                return;
+            }
+            let text = fennec_ui::controls::transcribe_samples(&samples, rate, &core_base);
+            // Whisper answers a near-inaudible clip with HTTP 200 and no text.
+            // That is a level problem, not the recogniser's, so report the
+            // number that proves it instead of "Didn't catch any words".
+            let text = match text {
+                Ok(words) if words.is_empty() && peak < 0.02 => Err(format!(
+                    "the microphone barely heard anything (peak {peak:.4} at {rate} Hz) — raise the input level or speak closer",
+                )),
+                other => other,
+            };
             let _ = tx.send(BackendResponse::Stt(text));
         });
     }
@@ -2773,7 +2806,7 @@ impl App {
             .child(div().flex().items_center().gap_3()
                 .child(brand_shield(&t))
                 .child(Label::new("Fennec").font_weight(FontWeight::SEMIBOLD))
-                .child(Label::new("Liso7150 / local-first workspace")
+                .child(Label::new("Foxen / local-first workspace")
                     .text_size(px(12.0)).text_color(t.muted_foreground)))
             .child(div().flex().items_center().gap_2()
                 .child(div().w(px(8.0)).h(px(8.0)).rounded_full().flex_shrink_0().bg(status_color))
@@ -3008,7 +3041,7 @@ impl App {
             )
             // `.user-section`
             .child(div().flex().flex_col().gap_1().pt_4().border_t_1().border_color(t.border)
-                .child(Label::new("Liso7150").text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD))
+                .child(Label::new("Foxen").text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD))
                 .child(Label::new("Local account").text_size(px(11.0)).text_color(t.muted_foreground)))
             // My Attention: the commands the user already answered, click to jump.
             .children(self.attention_only.then(|| {
@@ -3043,7 +3076,7 @@ impl App {
                     .to_lowercase().replace(' ', "-")
             });
         let branch = if self.branch.is_empty() { "main".to_string() } else { self.branch.clone() };
-        let repo_line = format!("Liso7150/{repo_slug} · {branch}");
+        let repo_line = format!("Foxen/{repo_slug} · {branch}");
         let title = tk.map(|tk| tk.title.clone()).unwrap_or_else(|| "New task".into());
         let status = tk.map(|tk| tk.status.clone()).unwrap_or_default();
         let badge_dot = task_dot(&status, &t);
