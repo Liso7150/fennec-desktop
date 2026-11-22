@@ -102,6 +102,10 @@ you instead — the run waits on the answer, and a timeout or cancel is a reject
 is read, written or displayed. The UI has no web view, so there is no DOM and no script
 injection surface. Both services are loopback-only.
 
+External connectors remain core-owned and do not change the native UI boundary. Nod connects through
+Fennec Core's opt-in, read-only MCP endpoint. Obsidian is not integrated; a future vault connector
+would be opt-in and approval-gated, with no embedded Node.js, Electron, or Obsidian runtime.
+
 ## Credits
 
 Engine: [Liso7150/fennec](https://github.com/Liso7150/fennec). Base idea:
