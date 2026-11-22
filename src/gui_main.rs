@@ -19,7 +19,7 @@ use fennec_ui::confirm::{Confirm, open_confirm};
 use fennec_ui::markdown::{artifact_badge, attachment_subtitle, diff_counts, rich_div};
 use fennec_ui::theme::{find_preset_index, theme_presets};
 use fennec_ui::timeline::{CallShape, GroupRow, block_open, block_title, clock, kind_of, live_stretch, reveal_text, short_text, unique_actions};
-use fennec_ui::widgets::{action_card, attachment_card, attachment_chips, brand_shield, composer_dock, composer_toolbar, msg_card, msg_footer, queue_strip, show_output, speak_tts, tool_group, user_card};
+use fennec_ui::widgets::{action_card, attachment_card, attachment_chips, brand_fox, composer_dock, composer_toolbar, msg_card, msg_footer, queue_strip, show_output, speak_tts, tool_group, user_card};
 use fennec_ui::workspace_dialog::open_workspace_dialog;
 use gpui_kit::base::Root;
 use gpui_kit::component::{
@@ -2804,7 +2804,7 @@ impl App {
         div().h(px(48.0)).flex_shrink_0().px_4().flex().items_center().justify_between()
             .bg(fennec_ui::theme::panel()).border_b_1().border_color(t.border)
             .child(div().flex().items_center().gap_3()
-                .child(brand_shield(&t))
+                .child(brand_fox(&t))
                 .child(Label::new("Fennec").font_weight(FontWeight::SEMIBOLD))
                 .child(Label::new("Foxen / local-first workspace")
                     .text_size(px(12.0)).text_color(t.muted_foreground)))
