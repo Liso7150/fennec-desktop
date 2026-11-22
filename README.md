@@ -3,9 +3,11 @@
 Fennec is a native Rust desktop app for the suite. The model, the agent loop,
 the tools and the workspace discovery all run on this device; nothing is hosted, no account,
 no API key, no cloud. It speaks to the two loopback services the suite already owns —
-the [fennec-core](https://github.com/Liso7150/fennec-core) agent server and the
+the Rust/Axum [coding-agent backend](https://github.com/Liso7150/fennec-coding-agent) and the
 [Fennec](https://github.com/Liso7150/fennec) inference engine — and presents them in one
-three-pane window.
+three-pane window. The Rust `fennec-agent` service in [fennec-coding-agent](https://github.com/Liso7150/fennec-coding-agent)
+is the canonical task and event boundary. The older `fennec-core` service remains only for
+compatibility routes that have not yet moved into the Rust contract.
 
 The app was rewritten from Electron/React/TypeScript to native Rust. The previous JS/TS
 source is preserved on the `legacy-electron` branch; the tracked source is Rust only.
@@ -24,7 +26,7 @@ binary, and a release build of it needs `fxc.exe` from the Windows SDK to compil
 
 | UI | Backend | Compaction | Tests | Platforms |
 |---|---|---|---|---|
-| native window, gpui-kit (`gui` feature) | agent server `127.0.0.1:8787`, engine SSE `127.0.0.1:8184` | `fennec-economy`, in-process | 47 | Windows, macOS, Linux |
+| native window, gpui-kit (`gui` feature) | Rust/Axum PWA/API `127.0.0.1:8787` (fallback `:8788`), engine SSE `127.0.0.1:8184` | `fennec-economy`, in-process | 47 | Windows, macOS, Linux |
 
 ## Architecture
 
@@ -76,10 +78,11 @@ cargo build  --release --features gui --offline   # needs fxc.exe on Windows
 cargo test --offline --features gui                   # 47 tests
 ```
 
-The engine and the agent server start independently of the app; the Environment panel offers
-`Start agent loop` when the server is not reachable. CI checks out `fennec-core` beside this
-repo and builds both binaries with `--features gui`, so the window CI publishes is the current
-one rather than the egui shell.
+The engine and the Rust/Axum coding-agent backend start independently of the app; the
+Environment panel offers `Start agent loop` when the backend is not reachable. The legacy
+`fennec-core` service is a separate process only when a compatibility route requires it.
+CI checks out `fennec-core` beside this repo and builds both binaries with `--features gui`, so the window CI
+publishes is the current one rather than the egui shell.
 
 The egui layout is tested without a window. One test paints the whole interface through
 `egui::Context::run_ui` and measures the triangles the painter would have received, at the

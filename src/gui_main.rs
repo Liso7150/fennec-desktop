@@ -7,7 +7,7 @@
 // terminal in the taskbar would be a second app the user did not ask for.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use fennec_client::coding_agent::CodingAgentClient;
+use fennec_client::coding_agent::{CodingAgentClient, GithubAccountStatus};
 use fennec_client::engine::{ChatDelta, Engine};
 use fennec_client::{git, outlet_rows, suite, Core, Outlet};
 
@@ -19,7 +19,7 @@ use fennec_ui::confirm::{Confirm, open_confirm};
 use fennec_ui::markdown::{artifact_badge, attachment_subtitle, diff_counts, rich_div};
 use fennec_ui::theme::{find_preset_index, theme_presets};
 use fennec_ui::timeline::{CallShape, GroupRow, block_open, block_title, clock, kind_of, live_stretch, reveal_text, short_text, unique_actions};
-use fennec_ui::widgets::{action_card, attachment_card, attachment_chips, brand_fox, composer_dock, composer_toolbar, msg_card, msg_footer, queue_strip, show_output, speak_tts, tool_group, user_card};
+use fennec_ui::widgets::{action_card, attachment_card, attachment_chips, brand_fox, composer_dock, composer_toolbar, msg_card, msg_footer, queue_strip, QueueAction, QueueItem, QueueOwner as UiQueueOwner, show_output, speak_tts, tool_group, user_card};
 use fennec_ui::workspace_dialog::open_workspace_dialog;
 use gpui_kit::base::Root;
 use gpui_kit::component::{
@@ -438,12 +438,43 @@ struct Task {
     progress: fennec_ui::timeline::ProgressLines,
 }
 
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+enum QueueOwner {
+    User,
+    Agent,
+}
+
+#[derive(Clone, Serialize, Debug, PartialEq, Eq)]
+struct QueueEntry {
+    text: String,
+    owner: QueueOwner,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum QueueEntryWire {
+    Legacy(String),
+    Current { text: String, owner: QueueOwner },
+}
+
+impl<'de> Deserialize<'de> for QueueEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match QueueEntryWire::deserialize(deserializer)? {
+            QueueEntryWire::Legacy(text) => Ok(Self { text, owner: QueueOwner::User }),
+            QueueEntryWire::Current { text, owner } => Ok(Self { text, owner }),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct History {
     tasks: Vec<Task>,
     active: Option<u64>,
     #[serde(default)]
-    queued: Vec<String>,
+    queued: Vec<QueueEntry>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -499,7 +530,7 @@ struct WorkspaceStore {
 struct App {
     tasks: Vec<Task>,
     active: Option<u64>,
-    queued: Vec<String>,
+    queued: Vec<QueueEntry>,
     inspector: bool,
     attention_only: bool,
     /// What the user last clicked each action block to, keyed on its anchor
@@ -537,11 +568,11 @@ struct App {
     ask_each: bool,
     settings_path: PathBuf,
     backend_ok: bool,
-    /// The Python agent loop (`fennec-agent serve`) on the same URL. It is the
-    /// only backend that gates a tool call, so the approval rail and the answer
-    /// buttons exist solely on this lane.
+    /// Legacy core compatibility state. New prompts prefer the Rust task API;
+    /// this lane remains only for routes not yet represented by that contract.
     core: Core,
     core_up: bool,
+    rust_up: bool,
     /// The directory the loop will accept a task for; anything else is a 403.
     core_root: String,
     /// The browser agents (`web_task` / `coworker_task`) as the loop last
@@ -551,6 +582,7 @@ struct App {
     /// user has something to install.
     outlets: Vec<Outlet>,
     outlets_known: bool,
+    github: GithubAccountStatus,
     /// Runs restored from history that the loop may still be working on: each
     /// is this window's task id and the session id it was started as. Consumed
     /// by the first resume attempt, whichever way it goes.
@@ -616,7 +648,8 @@ enum BackendResponse {
     /// `outlets` is the loop's last browser-agent report (`outlets_known` says
     /// whether there ever was one).
     ServeState { core_up: bool, core_root: String, axum: bool, engine: EngineState,
-                 branch: String, outlets: Vec<Outlet>, outlets_known: bool },
+                 branch: String, outlets: Vec<Outlet>, outlets_known: bool,
+                 github: GithubAccountStatus },
     Core(CoreEvent),
     Stt(Result<String, String>),
 }
@@ -779,8 +812,8 @@ impl App {
             composer_restore: None,
             allow_write, allow_shell, allow_web, ask_each,
             settings_path: settings_path.clone(), backend_ok: false,
-            core: Core { base: core_base }, core_up: false, core_root: String::new(),
-            outlets: Vec::new(), outlets_known: false,
+            core: Core { base: core_base }, core_up: false, rust_up: false, core_root: String::new(),
+            outlets: Vec::new(), outlets_known: false, github: GithubAccountStatus::default(),
             resume: Vec::new(),
             agents: vec![],
             path, next_id: 1, response_rx: rx, response_tx: tx,
@@ -798,11 +831,9 @@ impl App {
         app
     }
 
-    /// One URL can hold either Fennec backend, and they offer different things:
-    /// the Rust one streams chat and gates nothing, the Python agent loop gates
-    /// every write and asks. `/api/health` says which is answering — only the
-    /// loop's payload carries `app` — and the answer is re-checked because a
-    /// service started after this window still has to light up the rail.
+    /// Probe the Rust task service and the legacy core compatibility routes on
+    /// the same loopback URL. `/api/health` identifies the Rust service by its
+    /// backend field, while the legacy payload carries `app`.
     fn watch_service(&self) {
         let tx = self.response_tx.clone();
         let base = self.core.base.clone();
@@ -810,9 +841,10 @@ impl App {
         let engine_key = self.api_key.clone();
         let suite_root = self.suite_root.clone();
         std::thread::spawn(move || {
-            let core = Core { base };
+            let core = Core { base: base.clone() };
+            let agent = CodingAgentClient::with_base(base);
             let engine = Engine { base: engine_base, key: engine_key };
-            let mut last: Option<(bool, String, bool, EngineState, String, bool, Vec<Outlet>)> = None;
+            let mut last: Option<(bool, String, bool, EngineState, String, bool, Vec<Outlet>, GithubAccountStatus)> = None;
             loop {
                 let health = core.health();
                 let (core_up, core_root, axum) = match &health {
@@ -859,12 +891,13 @@ impl App {
                 let outlets: Vec<Outlet> = probed.as_ref()
                     .map(|o| o.list().into_iter().cloned().collect())
                     .unwrap_or_default();
+                let github = agent.github_account();
                 let state = (core_up, core_root.clone(), axum, engine_state.clone(), branch.clone(),
-                             outlets_known, outlets.clone());
+                             outlets_known, outlets.clone(), github.clone());
                 if last.as_ref() != Some(&state) {
                     let _ = tx.send(BackendResponse::ServeState {
                         core_up, core_root, axum, engine: engine_state, branch,
-                        outlets, outlets_known,
+                        outlets, outlets_known, github,
                     });
                     last = Some(state);
                 }
@@ -877,6 +910,7 @@ impl App {
         if let Ok(s) = std::fs::read_to_string(&self.path) {
             if let Ok(h) = serde_json::from_str::<History>(&s) {
                 self.queued = h.queued;
+                self.normalize_queue();
                 self.tasks = h.tasks;
                 self.active = h.active;
                 // A run persisted as Running is stale by definition: the thread
@@ -1141,11 +1175,13 @@ impl App {
                     self.agents = names;
                 }
                 BackendResponse::ServeState { core_up, core_root, axum, engine, branch,
-                                             outlets, outlets_known } => {
+                                             outlets, outlets_known, github } => {
                     self.core_up = core_up;
+                    self.rust_up = axum;
                     self.core_root = core_root;
                     self.outlets = outlets;
                     self.outlets_known = outlets_known;
+                    self.github = github;
                     self.engine = engine;
                     self.branch = branch;
                     // Either service answering means the composer can send;
@@ -1161,7 +1197,7 @@ impl App {
                     let live = self.tasks.iter()
                         .any(|t| matches!(t.status.as_str(), "Running" | "AwaitingApproval"));
                     if self.backend_ok && !live && !self.queued.is_empty() {
-                        let next = self.queued.remove(0);
+                        let next = self.queued.remove(0).text;
                         self.save();
                         self.dispatch(next, cx);
                     }
@@ -1284,7 +1320,7 @@ impl App {
                     self.pending_content = None;
                     self.fetch_backend_info();
                     if !self.queued.is_empty() {
-                        let next = self.queued.remove(0);
+                        let next = self.queued.remove(0).text;
                         self.save();
                         self.dispatch(next, cx);
                     }
@@ -1660,13 +1696,118 @@ impl App {
         });
     }
 
-    /// Take a queued prompt back out again, by its position in the strip. A
-    /// prompt that waits is still the user's, so the run never gets to decide
-    /// which of them it will say.
+    fn normalize_queue(&mut self) {
+        let mut agent = Vec::new();
+        let mut user = Vec::new();
+        for item in self.queued.drain(..) {
+            match item.owner {
+                QueueOwner::Agent => agent.push(item),
+                QueueOwner::User => user.push(item),
+            }
+        }
+        agent.extend(user);
+        self.queued = agent;
+    }
+
+    fn enqueue_user(&mut self, text: String) {
+        self.queued.push(QueueEntry { text, owner: QueueOwner::User });
+        self.normalize_queue();
+        self.save();
+    }
+
+    fn enqueue_agent(&mut self, items: Vec<String>) {
+        self.normalize_queue();
+        let mut incoming = Vec::new();
+        for text in items {
+            if !text.is_empty() && !self.queued.iter().any(|item| item.text == text) {
+                incoming.push(QueueEntry { text, owner: QueueOwner::Agent });
+            }
+        }
+        if !incoming.is_empty() {
+            let at = self.queued.iter().position(|item| item.owner == QueueOwner::User)
+                .unwrap_or(self.queued.len());
+            self.queued.splice(at..at, incoming);
+            self.save();
+        }
+    }
+
+    fn move_user_queue_item(&mut self, idx: usize, direction: isize) {
+        if self.queued.get(idx).is_none_or(|item| item.owner != QueueOwner::User) { return; }
+        let target = if direction < 0 {
+            (0..idx).rev().find(|&i| self.queued[i].owner == QueueOwner::User)
+        } else {
+            ((idx + 1)..self.queued.len()).find(|&i| self.queued[i].owner == QueueOwner::User)
+        };
+        if let Some(target) = target {
+            self.queued.swap(idx, target);
+            self.save();
+        }
+    }
+
+    fn edit_queue_item(&mut self, idx: usize, text: String) {
+        if let Some(item) = self.queued.get_mut(idx) {
+            if item.owner == QueueOwner::User && !text.trim().is_empty() {
+                item.text = text.trim().to_string();
+                self.save();
+            }
+        }
+    }
+
     fn remove_from_queue(&mut self, idx: usize) {
-        if idx < self.queued.len() {
+        if self.queued.get(idx).is_some_and(|item| item.owner == QueueOwner::User) {
             self.queued.remove(idx);
             self.save();
+        }
+    }
+
+    fn open_edit_queue_dialog(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.queued.get(idx) else { return };
+        if item.owner != QueueOwner::User { return; }
+        let initial_text = item.text.clone();
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_value(initial_text, window, cx);
+            state
+        });
+        let weak = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let input = input.clone();
+            let weak = weak.clone();
+            dialog.title("Edit queued task").content({
+                let input = input.clone();
+                let weak = weak.clone();
+                move |content, _, _| {
+                    let save_input = input.clone();
+                    let save_weak = weak.clone();
+                    content.flex().flex_col().gap_4()
+                        .child(div().flex().flex_col().gap_1()
+                            .child(Label::new("Task").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
+                            .child(Input::new(&input).h(px(32.0))))
+                        .child(div().flex().items_center().justify_end().gap_2()
+                            .child(Button::new("queue-edit-cancel").label("Cancel").ghost().small()
+                                .on_click(|_, window, cx| window.close_dialog(cx)))
+                            .child(Button::new("queue-edit-save").label("Save").small()
+                                .on_click(move |_, window, cx| {
+                                    if let Some(app) = save_weak.upgrade() {
+                                        let text = save_input.read(cx).value().trim().to_string();
+                                        app.update(cx, |a, cx| {
+                                            a.edit_queue_item(idx, text);
+                                            cx.notify();
+                                        });
+                                    }
+                                    window.close_dialog(cx);
+                                })))
+                }
+            }).on_close(|_, window, cx| window.close_dialog(cx))
+        });
+    }
+
+    fn queue_action(&mut self, action: QueueAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            QueueAction::Edit(idx) => self.open_edit_queue_dialog(idx, window, cx),
+            QueueAction::MoveUp(idx) => self.move_user_queue_item(idx, -1),
+            QueueAction::MoveDown(idx) => self.move_user_queue_item(idx, 1),
+            QueueAction::Remove(idx) => self.remove_from_queue(idx),
         }
     }
 
@@ -1828,8 +1969,7 @@ impl App {
         if text.is_empty() { return; }
         self.composer.update(cx, |state, cx| state.set_value("", window, cx));
         if self.working() {
-            self.queued.push(text);
-            self.save();
+            self.enqueue_user(text);
             cx.notify();
             return;
         }
@@ -1934,9 +2074,12 @@ impl App {
         }
         let text = format!("{prompt}{notes}{urls}");
 
-        // The loop is the only backend that gates a call. When it answers on
-        // this URL the prompt goes there, so the cards and the badge have a real
-        // question behind them; the Rust service stays the chat lane.
+        // The Rust task service is canonical for new prompts. The legacy core
+        // lane remains available only when the Rust service is not running.
+        if self.rust_up {
+            self.dispatch_rust(text, task_id, backend_id);
+            return;
+        }
         if self.core_up {
             self.dispatch_core(text, task_id);
             return;
@@ -2053,6 +2196,122 @@ impl App {
                     let _ = tx.send(BackendResponse::Complete {
                         task_id, status: "Failed".into(),
                         final_text: "Timed out waiting for the backend to finish.".into(),
+                    });
+                    return;
+                }
+            }
+        });
+    }
+
+    fn dispatch_rust(&self, text: String, task_id: u64, backend_id: Option<String>) {
+        let url = self.server_url.clone();
+        let tx = self.response_tx.clone();
+        std::thread::spawn(move || {
+            let client = CodingAgentClient::with_base(url);
+            if client.health().is_none() {
+                let _ = tx.send(BackendResponse::Offline);
+                return;
+            }
+
+            let existing = backend_id.filter(|id| client.get_task(id).is_some());
+            let (backend_task_id, created) = match existing {
+                Some(id) => {
+                    if let Err(error) = client.send_message(&id, &text) {
+                        let _ = tx.send(BackendResponse::Error(error));
+                        return;
+                    }
+                    (id, false)
+                }
+                None => {
+                    let task = match client.create_task(&text, Some(&text), "local", None) {
+                        Ok(task) => task,
+                        Err(error) => {
+                            let _ = tx.send(BackendResponse::Error(error));
+                            return;
+                        }
+                    };
+                    let id = task.id.clone();
+                    if let Err(error) = client.start_task(&id) {
+                        let _ = tx.send(BackendResponse::Error(error));
+                        return;
+                    }
+                    if let Err(error) = client.send_message(&id, &text) {
+                        let _ = tx.send(BackendResponse::Error(error));
+                        return;
+                    }
+                    (id, true)
+                }
+            };
+            if created {
+                let _ = tx.send(BackendResponse::TaskCreated {
+                    task_id,
+                    backend_id: backend_task_id.clone(),
+                });
+            }
+
+            let cancel = Arc::new(AtomicBool::new(false));
+            {
+                let cancel = cancel.clone();
+                let tx = tx.clone();
+                let stream_client = client.clone();
+                let stream_task_id = backend_task_id.clone();
+                std::thread::spawn(move || {
+                    let _ = stream_client.subscribe_events(&cancel, move |event| {
+                        if event.task_id.as_deref() != Some(stream_task_id.as_str()) {
+                            return;
+                        }
+                        let Some(payload) = event.payload.as_ref() else { return };
+                        match event.event_type.as_str() {
+                            "MessageStreamed" => {
+                                let Some(text) = payload.get("text").and_then(|v| v.as_str()) else { return };
+                                if text.is_empty() { return; }
+                                match payload.get("kind").and_then(|v| v.as_str()) {
+                                    Some("reasoning") => { let _ = tx.send(BackendResponse::ThinkDelta(text.to_string())); }
+                                    Some("content") => { let _ = tx.send(BackendResponse::ContentDelta(text.to_string())); }
+                                    _ => {}
+                                }
+                            }
+                            "TaskStatusChanged" if payload.get("status").and_then(|v| v.as_str()) == Some("complete") => {}
+                            "ToolStarted" => {
+                                let tool_id = payload.get("id").and_then(|v| v.as_str()).unwrap_or(&event.event_id).to_string();
+                                let title = payload.get("name").and_then(|v| v.as_str()).unwrap_or("Working").to_string();
+                                let _ = tx.send(BackendResponse::ActionStarted { tool_id, title });
+                            }
+                            "ToolCompleted" | "ToolProgressUpdated" => {
+                                let tool_id = payload.get("id").and_then(|v| v.as_str()).unwrap_or(&event.event_id).to_string();
+                                let detail = payload.get("result").and_then(|v| v.as_str())
+                                    .or_else(|| payload.get("detail").and_then(|v| v.as_str()))
+                                    .unwrap_or("").to_string();
+                                let duration = payload.get("duration_ms").and_then(|v| v.as_u64()).map(|ms| format!("{ms} ms"));
+                                let _ = tx.send(BackendResponse::ActionDone { tool_id, duration, detail });
+                            }
+                            _ => {}
+                        }
+                    });
+                });
+            }
+
+            let mut attempts = 0usize;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(350));
+                attempts += 1;
+                if let Some(task) = client.get_task(&backend_task_id) {
+                    if matches!(task.status.as_str(), "Complete" | "Failed" | "Cancelled") {
+                        cancel.store(true, Ordering::Relaxed);
+                        let final_text = task.messages.iter().rev()
+                            .find(|message| message.role == "Fennec")
+                            .map(|message| message.content.as_text())
+                            .unwrap_or_default();
+                        let _ = tx.send(BackendResponse::Complete { task_id, status: task.status, final_text });
+                        return;
+                    }
+                }
+                if attempts > 900 {
+                    cancel.store(true, Ordering::Relaxed);
+                    let _ = tx.send(BackendResponse::Complete {
+                        task_id,
+                        status: "Failed".into(),
+                        final_text: "Timed out waiting for the Rust backend to finish.".into(),
                     });
                     return;
                 }
@@ -2479,15 +2738,9 @@ impl App {
                 }
             }
             CoreEvent::Queue(items) => {
-                // Straight into the queue the user's own waiting prompts use, so
-                // an AI follow-up drains, shows and can be removed the same way.
-                // An item already in it is not added twice: the loop proposes the
-                // same wording again when two runs reach the same unfinished step.
-                for text in items {
-                    if !self.queued.contains(&text) {
-                        self.queued.push(text);
-                    }
-                }
+                // Complex runs leave unfinished follow-ups here. Agent-owned work
+                // stays ahead of user prompts and has no user mutation controls.
+                self.enqueue_agent(items);
             }
             CoreEvent::Approval { task_id, approval } => {
                 self.clear_think_placeholder(task_id);
@@ -2552,7 +2805,7 @@ impl App {
                         }
                     }
                     if !self.queued.is_empty() {
-                        let next = self.queued.remove(0);
+                        let next = self.queued.remove(0).text;
                         self.save();
                         self.dispatch(next, cx);
                     }
@@ -2804,10 +3057,9 @@ impl App {
         div().h(px(48.0)).flex_shrink_0().px_4().flex().items_center().justify_between()
             .bg(fennec_ui::theme::panel()).border_b_1().border_color(t.border)
             .child(div().flex().items_center().gap_3()
-                .child(brand_fox(&t))
-                .child(Label::new("Fennec").font_weight(FontWeight::SEMIBOLD))
-                .child(Label::new("Foxen / local-first workspace")
-                    .text_size(px(12.0)).text_color(t.muted_foreground)))
+                .child(div().w(px(32.0)).h(px(32.0)).rounded_lg().bg(t.accent.opacity(0.12))
+                    .flex().items_center().justify_center().child(brand_fox(&t)))
+                .child(Label::new("Fennec").font_weight(FontWeight::SEMIBOLD)))
             .child(div().flex().items_center().gap_2()
                 .child(div().w(px(8.0)).h(px(8.0)).rounded_full().flex_shrink_0().bg(status_color))
                 .child(Label::new(status_text).text_size(px(12.0)).text_color(t.muted_foreground))
@@ -2860,16 +3112,18 @@ impl App {
                     .child(Label::new(branch).font_family("monospace").text_size(px(11.0))
                         .text_color(t.muted_foreground))
                     .child(Label::new("·").text_size(px(11.0)).text_color(t.muted_foreground))
-                    .child(Label::new("Local mode").text_size(px(11.0)).text_color(t.muted_foreground))))
+                    .child(Label::new("1.0.0").font_family("monospace").text_size(px(10.0))
+                        .text_color(t.muted_foreground))
+                    .child(Label::new("working tree").text_size(px(11.0)).text_color(t.muted_foreground))))
             // `.nav-section`: four borderless rows, the selected one on --surface.
             .child(div().flex().flex_col().gap_1()
                 .child(Button::new("nav-coding").ghost().w_full().min_h(px(36.0)).rounded_md().px_3().py_2()
                     .justify_start()
                     .when(coding_active, |b| b.bg(surface))
                     .child(div().flex().items_center().gap_3()
-                        .child(Label::new("⊞").text_size(px(14.0)).w(px(18.0))
+                        .child(Label::new("≡").text_size(px(14.0)).w(px(18.0))
                             .text_color(if coding_active { t.accent } else { t.muted_foreground }))
-                        .child(Label::new("Coding").text_size(px(13.0)).font_weight(FontWeight::MEDIUM)))
+                        .child(Label::new("Recent tasks").text_size(px(13.0)).font_weight(FontWeight::MEDIUM)))
                     .on_click(cx.listener(|a, _, _, cx| {
                         a.attention_only = false;
                         a.search_open = false;
@@ -3040,9 +3294,22 @@ impl App {
                 }))
             )
             // `.user-section`
-            .child(div().flex().flex_col().gap_1().pt_4().border_t_1().border_color(t.border)
-                .child(Label::new("Foxen").text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD))
-                .child(Label::new("Local account").text_size(px(11.0)).text_color(t.muted_foreground)))
+            .child({
+                let github_label = self.github.account.as_ref()
+                    .map(|account| format!("GitHub · @{}", account.login))
+                    .unwrap_or_else(|| "GitHub · Sign in".into());
+                let github = Button::new("github-account").label(github_label.as_str()).ghost().xsmall()
+                    .on_click(cx.listener(|a, _, _, cx| {
+                        if a.github.authenticated {
+                            a.toast("GitHub is connected through the local GitHub CLI.", false);
+                        } else {
+                            a.toast("Run `gh auth login`, then reopen Fennec to refresh GitHub.", false);
+                        }
+                        cx.notify();
+                    }));
+                div().mt_auto().flex().items_center().justify_between().gap_3().pt_4().border_t_1().border_color(t.border)
+                    .child(github)
+            })
             // My Attention: the commands the user already answered, click to jump.
             .children(self.attention_only.then(|| {
                 let weak = cx.entity().downgrade();
@@ -3076,7 +3343,7 @@ impl App {
                     .to_lowercase().replace(' ', "-")
             });
         let branch = if self.branch.is_empty() { "main".to_string() } else { self.branch.clone() };
-        let repo_line = format!("Foxen/{repo_slug} · {branch}");
+        let repo_line = format!("{repo_slug} · {branch} · 1.0.0");
         let title = tk.map(|tk| tk.title.clone()).unwrap_or_else(|| "New task".into());
         let status = tk.map(|tk| tk.status.clone()).unwrap_or_default();
         let badge_dot = task_dot(&status, &t);
@@ -3335,7 +3602,10 @@ impl App {
         if self.queued.is_empty() {
             return div().into_any_element();
         }
-        let items = self.queued.clone();
+        let items: Vec<QueueItem> = self.queued.iter().map(|item| QueueItem {
+            text: item.text.clone(),
+            owner: if item.owner == QueueOwner::Agent { UiQueueOwner::Agent } else { UiQueueOwner::User },
+        }).collect();
         let weak = cx.entity().downgrade();
         let wr = weak.clone();
         queue_strip(&t, &items, move |window, cx| {
@@ -3343,9 +3613,9 @@ impl App {
                 let n = app.read(cx).queued.len();
                 window.push_notification(Notification::info(format!("{n} tasks in queue")), cx);
             }
-        }, move |i, _window, cx| {
+        }, move |action, window, cx| {
             let _ = wr.update(cx, |a, cx| {
-                a.remove_from_queue(i);
+                a.queue_action(action, window, cx);
                 cx.notify();
             });
         }).into_any_element()
