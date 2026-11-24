@@ -57,7 +57,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libasound2-dev
+            libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libssl-dev libasound2-dev
       - name: Test
         working-directory: fennec-desktop
         # `--features gui` because the gpui binary is `required-features = ["gui"]`:

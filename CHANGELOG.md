@@ -80,7 +80,8 @@ to compile shaders.
 
 ### Fixed
 - Release CI checks out the app and its shared crates as siblings and installs
-  ALSA on Ubuntu, so the native GPUI test/build matrix has the libraries it links
+  ALSA and XKB X11 development libraries on Ubuntu, so the native GPUI test/build
+  matrix has the libraries it links
 - Coding routing now requires a complete protocol-v1 core capability contract.
   Rust-only, partial, malformed or unavailable backends fail closed with an
   actionable core message; queue drain, approval answers and cancellation also
