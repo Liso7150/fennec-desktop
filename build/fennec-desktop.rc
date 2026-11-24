@@ -1,0 +1,8 @@
+// The Windows application icon, compiled and linked by build.rs.
+//
+// Ordinal 1 is deliberate twice over: it is the first icon group in the file,
+// which is what Explorer and the taskbar show for the exe, and it is the
+// resource gpui asks the module for by name (MAKEINTRESOURCE(1)) when it sets
+// the window class icon. icon.ico is rendered from icon.png, which is the
+// coding-agent's web/icons/icon-512.png byte for byte.
+1 ICON "icon.ico"
