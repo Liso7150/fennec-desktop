@@ -42,6 +42,10 @@ jobs:
         with:
           repository: Liso7150/fennec-economy
           path: fennec-economy
+      - uses: actions/checkout@v4
+        with:
+          repository: Liso7150/fennec-ui
+          path: fennec-ui
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ matrix.rust }}
@@ -63,10 +67,57 @@ jobs:
       - name: Build
         working-directory: fennec-desktop
         run: cargo build --release --features gui
+      - name: Package portable binaries
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          python - "$VERSION" <<'PY'
+          import os, pathlib, sys, tarfile, zipfile
+          version = sys.argv[1]
+          release = pathlib.Path("target/release")
+          names = ["fennec-desktop-gui", "fennec-desktop"]
+          if sys.platform == "win32":
+              names = [name + ".exe" for name in names]
+          platform = f"{os.environ['RUNNER_OS'].lower()}-{os.environ['RUNNER_ARCH'].lower()}"
+          files = []
+          for name in names:
+              source = release / name
+              if source.is_file():
+                  files.append(source)
+          if not files:
+              raise SystemExit("no desktop binaries to package")
+          if sys.platform == "win32":
+              asset = pathlib.Path("dist") / f"FennecDesktop-{version}-{platform}.zip"
+              with zipfile.ZipFile(asset, "w", zipfile.ZIP_DEFLATED) as archive:
+                  for source in files:
+                      archive.write(source, source.name)
+          else:
+              asset = pathlib.Path("dist") / f"FennecDesktop-{version}-{platform}.tar.gz"
+              with tarfile.open(asset, "w:gz") as archive:
+                  for source in files:
+                      archive.add(source, arcname=source.name)
+          print(asset)
+          PY
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: fennec-desktop-${{ matrix.os }}
-          path: |
-            fennec-desktop/target/release/${{ matrix.exe }}
-            fennec-desktop/target/release/${{ matrix.gui }}
+          path: dist/*
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fennec-desktop-*
+          path: dist
+          merge-multiple: true
+      - name: Publish checksums and release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          find dist -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > dist/SHA256SUMS
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" dist/*
