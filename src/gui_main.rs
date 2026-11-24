@@ -11,7 +11,7 @@ use fennec_client::coding_agent::{
     BackendCapabilities, CodingAgentClient, GithubAccountStatus, GithubRepository,
     GithubRepositoryStatus, ObsidianStatus,
 };
-use fennec_client::engine::{ChatDelta, Engine};
+use fennec_client::engine::Engine;
 use fennec_client::{git, outlet_rows, suite, Core, Outlet};
 
 use fennec_ui::attention::{
@@ -45,9 +45,154 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-const WARM_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
 const SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 const MAX_STT_SECONDS: usize = 120;
+const DEFAULT_CORE_URL: &str = "http://127.0.0.1:8787";
+const DEFAULT_RUST_URL: &str = "http://127.0.0.1:8788";
+const CODING_FEATURES: [&str; 4] = [
+    "supervised-agent",
+    "tool-execution",
+    "per-call-approvals",
+    "agent-polling",
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BackendBases {
+    core: String,
+    rust: String,
+    /// A pre-split `server_url`. It stays a candidate until capabilities say
+    /// which service it belongs to; health payloads never classify it.
+    legacy: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CapabilityProbes {
+    core: Option<BackendCapabilities>,
+    rust: Option<BackendCapabilities>,
+    legacy: Option<BackendCapabilities>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CodingRoute {
+    Core,
+    Unavailable,
+}
+
+struct ResumeWorker {
+    trigger: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+}
+
+fn clean_base(value: &str) -> String {
+    value.trim().trim_end_matches('/').to_string()
+}
+
+fn env_base(environ: &std::collections::HashMap<String, String>, primary: &str, legacy: &str) -> Option<String> {
+    suite::env_nonblank(environ, primary)
+        .or_else(|| suite::env_nonblank(environ, legacy))
+        .map(clean_base)
+        .filter(|base| !base.is_empty())
+}
+
+fn saved_base(value: &Option<String>) -> Option<String> {
+    value.as_deref().map(clean_base).filter(|base| !base.is_empty())
+}
+
+fn resolve_backend_bases(
+    settings: &Settings,
+    environ: &std::collections::HashMap<String, String>,
+) -> BackendBases {
+    let core = env_base(environ, "FENNEC_CORE_URL", "FENNEC_SERVICE_URL")
+        .or_else(|| saved_base(&settings.core_url))
+        .unwrap_or_else(|| DEFAULT_CORE_URL.to_string());
+    let rust = env_base(environ, "FENNEC_RUST_URL", "FENNEC_AGENT_URL")
+        .or_else(|| saved_base(&settings.rust_url))
+        .unwrap_or_else(|| DEFAULT_RUST_URL.to_string());
+    let split = env_base(environ, "FENNEC_CORE_URL", "FENNEC_SERVICE_URL").is_some()
+        || env_base(environ, "FENNEC_RUST_URL", "FENNEC_AGENT_URL").is_some()
+        || saved_base(&settings.core_url).is_some()
+        || saved_base(&settings.rust_url).is_some();
+    BackendBases {
+        core,
+        rust,
+        legacy: (!split).then(|| saved_base(&settings.server_url)).flatten(),
+    }
+}
+
+fn valid_capabilities(capabilities: &BackendCapabilities) -> bool {
+    capabilities.protocol_version == 1
+        && !capabilities.backend.trim().is_empty()
+        && !capabilities.implementation.trim().is_empty()
+        && !capabilities.version.trim().is_empty()
+}
+
+fn supports_coding(capabilities: &BackendCapabilities) -> bool {
+    valid_capabilities(capabilities)
+        && CODING_FEATURES.iter().all(|feature| capabilities.supports(feature))
+}
+
+/// Rust availability is deliberately not an input: a chat-only service can
+/// never make a coding prompt routable.
+fn coding_route(
+    core: Option<&BackendCapabilities>,
+    _rust: Option<&BackendCapabilities>,
+) -> CodingRoute {
+    if core.is_some_and(supports_coding) { CodingRoute::Core } else { CodingRoute::Unavailable }
+}
+
+fn coding_unavailable_message(core_base: &str) -> String {
+    format!(
+        "Coding is unavailable. Start fennec-core at {core_base} (or set FENNEC_CORE_URL) and \
+         ensure /api/capabilities advertises supervised-agent, tool-execution, per-call-approvals, \
+         and agent-polling. Rust chat-only and the inference engine are not coding fallbacks."
+    )
+}
+
+fn next_coding_prompt(route: CodingRoute, live: bool, queued: &[QueueEntry]) -> Option<String> {
+    (route == CodingRoute::Core && !live)
+        .then(|| queued.first().map(|entry| entry.text.clone()))
+        .flatten()
+}
+
+fn probe_capabilities(base: &str) -> Option<BackendCapabilities> {
+    CodingAgentClient::with_base(base.to_string())
+        .capabilities()
+        .filter(valid_capabilities)
+}
+
+/// Each service gets its own socket and worker, so an unresponsive core cannot
+/// hide a healthy Rust service (or the reverse).
+fn probe_backend_capabilities(bases: &BackendBases) -> CapabilityProbes {
+    let legacy = bases.legacy.as_ref().filter(|base| {
+        *base != &bases.core && *base != &bases.rust
+    }).cloned();
+    std::thread::scope(|scope| {
+        let core_base = bases.core.clone();
+        let rust_base = bases.rust.clone();
+        let core = scope.spawn(move || probe_capabilities(&core_base));
+        let rust = scope.spawn(move || probe_capabilities(&rust_base));
+        let legacy = legacy.map(|base| scope.spawn(move || probe_capabilities(&base)));
+        CapabilityProbes {
+            core: core.join().unwrap_or(None),
+            rust: rust.join().unwrap_or(None),
+            legacy: legacy.and_then(|worker| worker.join().unwrap_or(None)),
+        }
+    })
+}
+
+fn migrate_legacy_base(bases: &mut BackendBases, capabilities: &BackendCapabilities) -> bool {
+    let Some(legacy) = bases.legacy.clone() else { return false };
+    if !valid_capabilities(capabilities) { return false; }
+    if supports_coding(capabilities) {
+        if bases.rust == legacy { bases.rust = DEFAULT_RUST_URL.to_string(); }
+        bases.core = legacy;
+    } else {
+        if bases.core == legacy { bases.core = DEFAULT_CORE_URL.to_string(); }
+        bases.rust = legacy;
+    }
+    bases.legacy = None;
+    true
+}
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct Msg {
@@ -486,7 +631,12 @@ struct History {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct Settings {
+    /// Legacy ambiguous URL, retained only until `/api/capabilities` classifies it.
     server_url: Option<String>,
+    #[serde(default)]
+    core_url: Option<String>,
+    #[serde(default)]
+    rust_url: Option<String>,
     engine_url: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
@@ -588,7 +738,8 @@ struct App {
     search_open: bool,
     search: Entity<InputState>,
     composer: Entity<InputState>,
-    server_url: String,
+    rust_url: String,
+    legacy_server_url: Option<String>,
     engine_url: String,
     api_key: String,
     model: String,
@@ -613,9 +764,8 @@ struct App {
     allow_web: bool,
     ask_each: bool,
     settings_path: PathBuf,
-    backend_ok: bool,
-    /// Legacy core compatibility state. New prompts prefer the Rust task API;
-    /// this lane remains only for routes not yet represented by that contract.
+    /// fennec-core owns supervised coding. The Rust service remains available
+    /// for chat-only and integration routes, never as an automatic coding route.
     core: Core,
     core_up: bool,
     rust_up: bool,
@@ -631,24 +781,23 @@ struct App {
     github: GithubAccountStatus,
     github_repositories: GithubRepositoryStatus,
     obsidian: ObsidianStatus,
-    capabilities: Option<BackendCapabilities>,
+    core_capabilities: Option<BackendCapabilities>,
+    rust_capabilities: Option<BackendCapabilities>,
     /// Runs restored from history that the loop may still be working on: each
-    /// is this window's task id and the session id it was started as. Consumed
-    /// by the first resume attempt, whichever way it goes.
+    /// is this window's task id and the session id it was started as.
     resume: Vec<(u64, String)>,
+    resume_worker: Option<ResumeWorker>,
     agents: Vec<String>,
     path: PathBuf,
     next_id: u64,
     response_rx: std::sync::mpsc::Receiver<BackendResponse>,
     response_tx: std::sync::mpsc::Sender<BackendResponse>,
     pending_think: Option<(u64, u64)>,
-    pending_content: Option<(u64, u64)>,
     tools: std::collections::HashMap<String, (u64, u64)>,
     _task: gpui_kit::Task<()>,
     scroll_handle: ScrollHandle,
     line: String,
     toasts: Vec<Toast>,
-    pending_send: Option<(String, std::time::Instant)>,
     workspaces: Vec<Workspace>,
     active_workspace_id: Option<String>,
     /// Rows whose +/×/✎ buttons the pointer is over. The PWA reveals the same
@@ -910,25 +1059,16 @@ fn decode_page(value: serde_json::Value) -> Result<BrPage, String> {
 
 #[derive(Debug)]
 enum BackendResponse {
-    Offline,
-    Error(String),
-    TaskCreated { task_id: u64, backend_id: String },
-    ThinkDelta(String),
-    ContentDelta(String),
-    ActionStarted { tool_id: String, title: String },
-    ActionDone { tool_id: String, duration: Option<String>, detail: String },
-    Complete { task_id: u64, status: String, final_text: String },
-    Failed(String),
     BackendInfo { names: Vec<String> },
+    BackendsMigrated { core_url: String, rust_url: String },
     GithubRepoCreated { workspace_id: String, result: Result<GithubRepository, String> },
-    /// Which services answer, re-probed every couple of seconds and reported
-    /// only when something changed. `branch` is the workspace's git branch, and
-    /// `outlets` is the loop's last browser-agent report (`outlets_known` says
-    /// whether there ever was one).
-    ServeState { core_up: bool, core_root: String, axum: bool, engine: EngineState,
+    /// Independent core/Rust probes, reported only when something changed.
+    /// Capabilities are kept apart and are the only authority for coding routes.
+    ServeState { core_up: bool, rust_up: bool, core_root: String, engine: EngineState,
                  branch: String, outlets: Vec<Outlet>, outlets_known: bool,
                  github: GithubAccountStatus, github_repositories: GithubRepositoryStatus,
-                 obsidian: ObsidianStatus, capabilities: Option<BackendCapabilities> },
+                 obsidian: ObsidianStatus, core_capabilities: Option<BackendCapabilities>,
+                 rust_capabilities: Option<BackendCapabilities> },
     Core(CoreEvent),
     Stt(Result<String, String>),
     ObsidianWrite(Result<String, String>),
@@ -1028,6 +1168,12 @@ impl App {
                 cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
                 if weak.update(cx, |a, cx| {
                     a.poll_responses(cx);
+                    // A restored queue may be waiting for core's capability
+                    // response, which is independent of its health.
+                    if !a.resume.is_empty() {
+                        a.resume_runs();
+                    }
+                    a.drain_coding_queue(cx);
                     a.flush_save();
                     a.toasts.retain(|t| t.at.elapsed() < std::time::Duration::from_secs(6));
                     if a.working() && last_tick.elapsed() >= std::time::Duration::from_secs(1) {
@@ -1064,13 +1210,9 @@ impl App {
         }).detach();
 
         let settings = load_settings(&settings_path);
-        // The environment has to win over the settings file: this app writes its
-        // defaults there on first run, so a stored value always exists, and a var
-        // that loses to it - `FENNEC_AGENT_URL` pointed at another loop - could
-        // never take effect on a machine that has opened the app once.
-        let server_url = std::env::var("FENNEC_AGENT_URL").ok()
-            .or(settings.server_url)
-            .unwrap_or_else(|| "http://127.0.0.1:8787".into());
+        // The two services have separate contracts and defaults. An old
+        // `server_url` is only a candidate until its capabilities answer.
+        let bases = resolve_backend_bases(&settings, &suite::real_environ());
         let engine_url = std::env::var("FENNEC_ENGINE_URL").ok()
             .or(settings.engine_url)
             .unwrap_or_else(|| "http://127.0.0.1:8184".into());
@@ -1100,9 +1242,6 @@ impl App {
         let insp_tab = settings.insp_tab.as_deref()
             .and_then(InspTab::parse)
             .unwrap_or(InspTab::Overview);
-        // Both backends listen on the same port, so the core lane shares this URL.
-        let core_base = server_url.clone();
-
         let mut app = Self {
             tasks: vec![], active: None, queued: vec![], inspector: true,
             rail_width, inspector_width, pane_drag: None,
@@ -1110,7 +1249,8 @@ impl App {
             insp_tab, fm: FmState::default(), br: BrState::default(), br_input,
             fm_seq: 0, file_seq: 0, br_seq: 0,
             attention_only: false, block_open: Default::default(), search_open: false, search, composer,
-            server_url, engine_url, api_key, model, access_mode, reasoning_effort,
+            rust_url: bases.rust.clone(), legacy_server_url: bases.legacy.clone(),
+            engine_url, api_key, model, access_mode, reasoning_effort,
             theme, font_size, auto_save,
             notifications,
             perm_dropdown_open: false, model_dropdown_open: false,
@@ -1121,15 +1261,15 @@ impl App {
             stt_stream: None,
             composer_restore: None,
             allow_write, allow_shell, allow_web, ask_each,
-            settings_path: settings_path.clone(), backend_ok: false,
-            core: Core { base: core_base }, core_up: false, rust_up: false, core_root: String::new(),
+            settings_path: settings_path.clone(),
+            core: Core { base: bases.core.clone() }, core_up: false, rust_up: false, core_root: String::new(),
             outlets: Vec::new(), outlets_known: false, github: GithubAccountStatus::default(),
             github_repositories: GithubRepositoryStatus::default(), obsidian: ObsidianStatus::default(),
-            capabilities: None, resume: Vec::new(),
+            core_capabilities: None, rust_capabilities: None, resume: Vec::new(), resume_worker: None,
             agents: vec![],
             path, next_id: 1, response_rx: rx, response_tx: tx,
-            pending_think: None, pending_content: None, tools: std::collections::HashMap::new(),
-            _task, scroll_handle: ScrollHandle::new(), line: String::new(), toasts: Vec::new(), pending_send: None,
+            pending_think: None, tools: std::collections::HashMap::new(),
+            _task, scroll_handle: ScrollHandle::new(), line: String::new(), toasts: Vec::new(),
             workspaces: vec![], active_workspace_id: None,
             hovered_workspace_id: None, hovered_task_id: None, hovered_ws_header: false,
             workspaces_path: settings_path.parent().unwrap_or(&settings_path).join("workspaces.json"),
@@ -1141,37 +1281,60 @@ impl App {
         };
         app.load_workspaces();
         app.fetch_backend_info();
-        app.watch_service();
+        app.watch_service(bases);
         app
     }
 
-    /// Probe the Rust task service and the legacy core compatibility routes on
-    /// the same loopback URL. `/api/health` identifies the Rust service by its
-    /// backend field, while the legacy payload carries `app`.
-    fn watch_service(&self) {
+    /// Probe fennec-core and the Rust service independently. Health is used for
+    /// informational routes and workspace context only; `/api/capabilities` is
+    /// the sole authority for coding availability and legacy URL migration.
+    fn watch_service(&self, mut bases: BackendBases) {
         let tx = self.response_tx.clone();
-        let base = self.core.base.clone();
         let engine_base = self.engine_url.clone();
         let engine_key = self.api_key.clone();
         let suite_root = self.suite_root.clone();
         std::thread::spawn(move || {
-            let core = Core { base: base.clone() };
-            let agent = CodingAgentClient::with_base(base);
             let engine = Engine { base: engine_base, key: engine_key };
             let mut last: Option<(
-                bool, String, bool, EngineState, String, bool, Vec<Outlet>, GithubAccountStatus,
+                bool, bool, String, EngineState, String, bool, Vec<Outlet>, GithubAccountStatus,
                 GithubRepositoryStatus, ObsidianStatus, Option<BackendCapabilities>,
+                Option<BackendCapabilities>,
             )> = None;
             loop {
-                let health = core.health();
-                let (core_up, core_root, axum) = match &health {
-                    Some(h) if h["app"].is_string() =>
-                        (true, h["workspace"].as_str().unwrap_or("").to_string(), false),
-                    Some(_) => (false, String::new(), true),
-                    None => (false, String::new(), false),
-                };
-                // The branch is read where the work happens: the loop's own
-                // workspace when it answers, otherwise the suite checkout.
+                let probes = probe_backend_capabilities(&bases);
+                let mut probes = probes;
+                let legacy_capabilities = bases.legacy.as_ref().and_then(|legacy| {
+                    if legacy == &bases.core {
+                        probes.core.clone()
+                    } else if legacy == &bases.rust {
+                        probes.rust.clone()
+                    } else {
+                        probes.legacy.clone()
+                    }
+                });
+                if let Some(capabilities) = legacy_capabilities {
+                    if migrate_legacy_base(&mut bases, &capabilities) {
+                        let _ = tx.send(BackendResponse::BackendsMigrated {
+                            core_url: bases.core.clone(), rust_url: bases.rust.clone(),
+                        });
+                    }
+                    // Probe the migrated destinations before reporting their
+                    // capabilities. The legacy response classified the URL, not
+                    // the service now listening at the old default.
+                    probes = probe_backend_capabilities(&bases);
+                }
+
+                let core = Core { base: bases.core.clone() };
+                let agent = CodingAgentClient::with_base(bases.rust.clone());
+                let core_health = core.health();
+                let core_up = core_health.is_some();
+                let core_root = core_health.as_ref()
+                    .filter(|health| health["app"].is_string())
+                    .and_then(|health| health["workspace"].as_str())
+                    .unwrap_or("").to_string();
+                let rust_up = agent.health().is_some();
+                // The branch is read where the work happens: core's workspace
+                // when it answers, otherwise the suite checkout.
                 let dir = if core_root.is_empty() {
                     suite_root.clone()
                 } else {
@@ -1199,12 +1362,14 @@ impl App {
                         }
                     }
                 }
-                // `/api/outlets` is served by whichever loop answers `/api/health` —
-                // the Rust backend or the legacy core route — so the rail probes on
-                // either. An empty rail here means the loop did not answer, which is
-                // a different claim from "not installed" and says so.
-                // Core caches the probes; this is one loopback GET.
-                let probed = if core_up || axum { core.outlets() } else { None };
+                // Both services expose this informational route. Prefer core,
+                // then Rust, without treating either answer as coding capability.
+                let outlet_base = if core_up { bases.core.clone() }
+                    else if rust_up { bases.rust.clone() }
+                    else { String::new() };
+                let probed = (!outlet_base.is_empty())
+                    .then(|| Core { base: outlet_base }.outlets())
+                    .flatten();
                 let outlets_known = probed.is_some();
                 let outlets: Vec<Outlet> = probed.as_ref()
                     .map(|o| o.list().into_iter().cloned().collect())
@@ -1212,14 +1377,14 @@ impl App {
                 let github = agent.github_account();
                 let github_repositories = agent.github_repositories();
                 let obsidian = agent.obsidian_status();
-                let capabilities = agent.capabilities();
-                let state = (core_up, core_root.clone(), axum, engine_state.clone(), branch.clone(),
+                let state = (core_up, rust_up, core_root.clone(), engine_state.clone(), branch.clone(),
                              outlets_known, outlets.clone(), github.clone(), github_repositories.clone(),
-                             obsidian.clone(), capabilities.clone());
+                             obsidian.clone(), probes.core.clone(), probes.rust.clone());
                 if last.as_ref() != Some(&state) {
                     let _ = tx.send(BackendResponse::ServeState {
-                        core_up, core_root, axum, engine: engine_state, branch,
-                        outlets, outlets_known, github, github_repositories, obsidian, capabilities,
+                        core_up, rust_up, core_root, engine: engine_state, branch,
+                        outlets, outlets_known, github, github_repositories, obsidian,
+                        core_capabilities: probes.core, rust_capabilities: probes.rust,
                     });
                     last = Some(state);
                 }
@@ -1353,7 +1518,6 @@ impl App {
             }
         }
         self.pending_think = None;
-        self.pending_content = None;
         self.tools.clear();
         // No card of a restored history is in flight in this window, so no line
         // it reported can still be true.
@@ -1399,7 +1563,9 @@ impl App {
 
     fn save_settings(&self) {
         let s = Settings {
-            server_url: Some(self.server_url.clone()),
+            server_url: self.legacy_server_url.clone(),
+            core_url: Some(self.core.base.clone()),
+            rust_url: Some(self.rust_url.clone()),
             engine_url: Some(self.engine_url.clone()),
             api_key: Some(self.api_key.clone()),
             model: Some(self.model.clone()),
@@ -1536,7 +1702,7 @@ impl App {
     }
 
     fn fetch_backend_info(&self) {
-        let url = self.server_url.clone();
+        let url = self.rust_url.clone();
         let tx = self.response_tx.clone();
         std::thread::spawn(move || {
             let client = CodingAgentClient::with_base(url);
@@ -1572,6 +1738,12 @@ impl App {
                 }
                 BackendResponse::BackendInfo { names } => {
                     self.agents = names;
+                }
+                BackendResponse::BackendsMigrated { core_url, rust_url } => {
+                    self.core.base = core_url;
+                    self.rust_url = rust_url;
+                    self.legacy_server_url = None;
+                    self.save_settings();
                 }
                 BackendResponse::GithubRepoCreated { workspace_id, result } => {
                     match result {
@@ -1643,11 +1815,11 @@ impl App {
                         }
                     }
                 }
-                BackendResponse::ServeState { core_up, core_root, axum, engine, branch,
+                BackendResponse::ServeState { core_up, rust_up, core_root, engine, branch,
                                              outlets, outlets_known, github, github_repositories,
-                                             obsidian, capabilities } => {
+                                             obsidian, core_capabilities, rust_capabilities } => {
                     self.core_up = core_up;
-                    self.rust_up = axum;
+                    self.rust_up = rust_up;
                     self.core_root = core_root;
                     self.sync_workspace_github_repos();
                     self.outlets = outlets;
@@ -1655,156 +1827,16 @@ impl App {
                     self.github = github;
                     self.github_repositories = github_repositories;
                     self.obsidian = obsidian;
-                    self.capabilities = capabilities;
+                    self.core_capabilities = core_capabilities;
+                    self.rust_capabilities = rust_capabilities;
                     self.engine = engine;
                     self.branch = branch;
-                    // Either service answering means the composer can send;
-                    // which one decides where the prompt goes.
-                    self.backend_ok = axum || core_up;
-                    if axum { self.fetch_backend_info(); }
-                    self.flush_warm_queue();
-                    // A queue read back from the history file has no finishing
-                    // run to hand it off to, so it would sit at "Next" until some
-                    // later run ended. Once the backend answers and nothing is
-                    // live, the head goes to work — the rule the PWA applies on
-                    // its health poll.
-                    let live = self.tasks.iter()
-                        .any(|t| matches!(t.status.as_str(), "Running" | "AwaitingApproval"));
-                    if self.backend_ok && !live && !self.queued.is_empty() {
-                        let next = self.queued.remove(0).text;
-                        self.save();
-                        self.dispatch(next, cx);
-                    }
+                    if rust_up { self.fetch_backend_info(); }
+                    // A restored queue may wait for core to finish starting. Rust
+                    // health alone never releases it.
+                    self.drain_coding_queue(cx);
                 }
                 BackendResponse::Core(ev) => self.apply_core(ev, cx),
-                BackendResponse::Offline => {
-                    self.finish_think("Backend offline — start `fennec-agent` or set the server URL in Settings.");
-                    if let Some((tid, _)) = self.pending_think { self.set_task_status(tid, "Failed"); }
-                    self.pending_think = None;
-                    self.pending_content = None;
-                }
-                BackendResponse::Error(e) => {
-                    self.finish_think(&format!("Backend error: {e}"));
-                    if let Some((tid, _)) = self.pending_think { self.set_task_status(tid, "Failed"); }
-                    self.pending_think = None;
-                    self.pending_content = None;
-                }
-                BackendResponse::TaskCreated { task_id, backend_id } => {
-                    if let Some(t) = self.tasks.iter_mut().find(|t| t.id == task_id) {
-                        t.backend_id = Some(backend_id);
-                    }
-                }
-                BackendResponse::ThinkDelta(text) => {
-                    if let Some((tid, mid)) = self.pending_think {
-                        if let Some(m) = self.msg_mut(tid, mid) {
-                            if m.content == "Thinking…" { m.content = text; }
-                            else { m.content.push_str(&text); }
-                        }
-                    }
-                }
-                BackendResponse::ContentDelta(text) => {
-                    let (tid, mid) = match self.pending_content {
-                        Some(pair) => pair,
-                        None => {
-                            let Some((tid, _)) = self.pending_think else { continue };
-                            let mid = self.next_id;
-                            self.next_id += 1;
-                            if let Some(t) = self.tasks.iter_mut().find(|t| t.id == tid) {
-                                t.msgs.push(Msg {
-                                    id: mid, author: "Fennec".into(), content: String::new(),
-                                    kind: MsgKind::Result, time: now(), collapsed: false, meta: None,
-                                });
-                            }
-                            self.pending_content = Some((tid, mid));
-                            self.scroll_handle.scroll_to_bottom();
-                            (tid, mid)
-                        }
-                    };
-                    if let Some(m) = self.msg_mut(tid, mid) {
-                        m.content.push_str(&text);
-                    }
-                    self.scroll_handle.scroll_to_bottom();
-                }
-                BackendResponse::ActionStarted { tool_id, title } => {
-                    let Some((tid, _)) = self.pending_think else { continue };
-                    let mid = self.next_id;
-                    self.next_id += 1;
-                    if let Some(t) = self.tasks.iter_mut().find(|t| t.id == tid) {
-                        t.msgs.push(Msg {
-                            id: mid, author: "Fennec".into(), content: String::new(),
-                            kind: MsgKind::Action, time: now(), collapsed: true,
-                            meta: Some(MsgMeta {
-                                duration: None, title: Some(title),
-                                add: None, del: None, path: None, size: None, verb: None, root: None, call_id: None,
-                            }),
-                        });
-                    }
-                    self.tools.insert(tool_id, (tid, mid));
-                }
-                BackendResponse::ActionDone { tool_id, duration, detail } => {
-                    if let Some(&(tid, mid)) = self.tools.get(&tool_id) {
-                        if let Some(m) = self.msg_mut(tid, mid) {
-                            // `duration` doubles as the row's done-flag: `None` is
-                            // what makes it read "Running…", so a finished tool
-                            // with no timing still has to be marked Some.
-                            if let Some(meta) = m.meta.as_mut() { meta.duration = Some(duration.unwrap_or_default()); }
-                            m.content = detail;
-                        }
-                    }
-                    self.tools.remove(&tool_id);
-                }
-                BackendResponse::Complete { task_id, status, final_text } => {
-                    let (think, content) = (self.pending_think, self.pending_content);
-                    if let Some((tid, mid)) = think {
-                        if status == "Failed" && content.is_none() && final_text.is_empty() {
-                            // A failed send with nothing streamed keeps an error
-                            // row in the timeline instead of vanishing.
-                            self.finish_think("The engine did not respond to this task.");
-                        } else {
-                            // Thoughts stay in the timeline after completion; drop
-                            // the row only when no thought text ever streamed in.
-                            if let Some(t) = self.tasks.iter_mut().find(|t| t.id == tid) {
-                                if t.msgs.iter().any(|m| m.id == mid && m.content == "Thinking…") {
-                                    t.msgs.retain(|m| m.id != mid);
-                                }
-                            }
-                        }
-                    }
-                    match content {
-                        Some((tid, mid)) => {
-                            if !final_text.is_empty() {
-                                if let Some(m) = self.msg_mut(tid, mid) { m.content = final_text; }
-                            }
-                        }
-                        None => {
-                            if !final_text.is_empty() {
-                                let mid = self.next_id;
-                                self.next_id += 1;
-                                if let Some(t) = self.tasks.iter_mut().find(|t| t.id == task_id) {
-                                    t.msgs.push(Msg {
-                                        id: mid, author: "Fennec".into(), content: final_text,
-                                        kind: MsgKind::Result, time: now(), collapsed: false, meta: None,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    self.set_task_status(task_id, &status);
-                    self.pending_think = None;
-                    self.pending_content = None;
-                    self.fetch_backend_info();
-                    if !self.queued.is_empty() {
-                        let next = self.queued.remove(0).text;
-                        self.save();
-                        self.dispatch(next, cx);
-                    }
-                }
-                BackendResponse::Failed(e) => {
-                    self.finish_think(&format!("Send failed: {e}"));
-                    if let Some((tid, _)) = self.pending_think { self.set_task_status(tid, "Failed"); }
-                    self.pending_think = None;
-                    self.pending_content = None;
-                }
             }
             self.save();
         }
@@ -1816,15 +1848,6 @@ impl App {
     fn msg_mut(&mut self, task_id: u64, msg_id: u64) -> Option<&mut Msg> {
         self.tasks.iter_mut().find(|t| t.id == task_id)
             .and_then(|t| t.msgs.iter_mut().find(|m| m.id == msg_id))
-    }
-
-    fn finish_think(&mut self, text: &str) {
-        let Some((tid, mid)) = self.pending_think else { return };
-        if let Some(m) = self.msg_mut(tid, mid) {
-            m.content = text.into();
-            m.kind = MsgKind::Result;
-            m.collapsed = false;
-        }
     }
 
     fn set_task_status(&mut self, task_id: u64, status: &str) {
@@ -2065,7 +2088,6 @@ impl App {
         self.queued.clear();
         self.next_id = 1;
         self.pending_think = None;
-        self.pending_content = None;
         self.tools.clear();
         self.save();
         cx.notify();
@@ -2306,7 +2328,7 @@ impl App {
     }
 
     fn create_github_repository(&self, workspace_id: String, name: String) {
-        let base = self.server_url.clone();
+        let base = self.rust_url.clone();
         let tx = self.response_tx.clone();
         std::thread::spawn(move || {
             let result = CodingAgentClient::with_base(base).create_github_repository(&name, true);
@@ -2418,50 +2440,6 @@ impl App {
         }
     }
 
-    fn flush_warm_queue(&mut self) {
-        let Some((text, queued)) = self.pending_send.take() else { return };
-        if self.backend_ok {
-            self.send_text(text);
-        } else if queued.elapsed() < WARM_WINDOW {
-            self.pending_send = Some((text, queued));
-        } else {
-            self.line = "The backend did not answer within the warm-up window. \
-                The queued prompt has been discarded."
-                .to_string();
-        }
-    }
-
-    fn send_text(&mut self, text: String) {
-        if text.is_empty() { return; }
-        let task_id = self.next_id;
-        self.next_id += 1;
-        let repo = self.repo_label();
-        self.tasks.push(Task {
-            id: task_id,
-            title: text.chars().take(40).collect(),
-            status: "Running".into(),
-            repo,
-            msgs: vec![Msg {
-                id: 1,
-                author: "You".into(),
-                content: text.clone(),
-                kind: MsgKind::User,
-                time: now(),
-                collapsed: false,
-                meta: None,
-            }],
-            backend_id: None,
-            started_at: Some(chrono::Utc::now().timestamp()),
-            approvals: vec![],
-            core_sid: None,
-            workspace_id: self.active_workspace_id.clone(),
-            plan: vec![],
-            progress: Default::default(),
-        });
-        self.active = Some(task_id);
-        self.save();
-    }
-
     fn open_rename_task_dialog(&mut self, task_id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let title = self.tasks.iter().find(|t| t.id == task_id).map(|t| t.title.clone()).unwrap_or_default();
         let name_input = cx.new(|cx| {
@@ -2528,39 +2506,81 @@ impl App {
             cx.notify();
             return;
         }
-        // A prompt needs somewhere to go. The services are what gate calls and
-        // write files; the engine alone answers nothing but a question, so it
-        // counts as somewhere to go, and the rail keeps reporting the backend
-        // offline instead of pretending a chat is a run.
-        if !self.backend_ok && !self.engine.up {
-            if self.pending_send.is_some() {
-                self.line = "The backend is still warming and it already holds a prompt. \
-                    This one stays in the composer until that one sends."
-                    .to_string();
-                self.composer.update(cx, |state, cx| state.set_value(&text, window, cx));
-                return;
-            }
-            self.pending_send = Some((text, std::time::Instant::now()));
-            self.line = "Backend is offline - prompt queued. It will send once the backend answers.".to_string();
-            cx.notify();
-            return;
-        }
         self.dispatch(text, cx);
     }
 
-    fn dispatch(&mut self, text: String, cx: &mut Context<Self>) {
+    fn coding_route(&self) -> CodingRoute {
+        coding_route(self.core_capabilities.as_ref(), self.rust_capabilities.as_ref())
+    }
+
+    fn coding_ready(&self) -> bool {
+        self.coding_route() == CodingRoute::Core
+    }
+
+    fn live_coding_task(&self) -> bool {
+        self.tasks.iter().any(|task| {
+            matches!(task.status.as_str(), "Running" | "AwaitingApproval")
+        })
+    }
+
+    /// A restored queue waits for supervised core capability. Rust health or a
+    /// live inference engine cannot release coding work.
+    fn drain_coding_queue(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = next_coding_prompt(
+            self.coding_route(), self.live_coding_task(), &self.queued,
+        ) else { return };
+        self.queued.remove(0);
+        self.save();
+        self.dispatch(text, cx);
+    }
+
+    fn coding_unavailable(&mut self, text: String, cx: &mut Context<Self>) {
+        let message = coding_unavailable_message(&self.core.base);
         self.ensure_task();
-        let backend_id = self.task().and_then(|t| t.backend_id.clone());
+        if self.task().map(|task| task.title == "New task").unwrap_or(true) {
+            if let Some(task) = self.task_mut() {
+                task.title = text.chars().take(40).collect();
+            }
+        }
+        if let Some(task) = self.task_mut() {
+            task.status = "Unavailable".into();
+        }
+        let mid = self.next_id;
+        self.next_id += 1;
+        if let Some(task) = self.task_mut() {
+            task.msgs.push(Msg {
+                id: mid, author: "You".into(), content: text, kind: MsgKind::User,
+                time: now(), collapsed: false, meta: None,
+            });
+        }
+        let mid = self.next_id;
+        self.next_id += 1;
+        if let Some(task) = self.task_mut() {
+            task.msgs.push(Msg {
+                id: mid, author: "Fennec".into(), content: message.clone(), kind: MsgKind::Result,
+                time: now(), collapsed: false, meta: None,
+            });
+        }
+        self.line = message;
+        self.save();
+        self.scroll_handle.scroll_to_bottom();
+        cx.notify();
+    }
+
+    fn dispatch(&mut self, text: String, cx: &mut Context<Self>) {
+        if !self.coding_ready() {
+            self.coding_unavailable(text, cx);
+            return;
+        }
+        self.ensure_task();
         let task_id = self.active.unwrap_or(0);
         let first_prompt = self.task().map(|t| t.title == "New task").unwrap_or(true);
 
         let uid = self.next_id; self.next_id += 1;
         self.add_msg(Msg { id: uid, author: "You".into(), content: text.clone(), kind: MsgKind::User, time: now(), collapsed: false, meta: None }, cx);
 
-        // The files the picker handed over get cards of their own, under the
-        // prompt they belong to. They carry no verb — the run did not make them,
-        // the user did — and their path is the real one the chooser returned, so
-        // the card opens the file on disk instead of a copy of its bytes.
+        // Picked files belong only to this prompt. Text is inlined for the core
+        // loop; coding has no engine-only multimodal fallback.
         let atts = std::mem::take(&mut self.pending_atts);
         for path in &atts {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned())
@@ -2588,22 +2608,11 @@ impl App {
 
         let think_id = self.next_id; self.next_id += 1;
         self.add_msg(Msg { id: think_id, author: "Fennec".into(), content: "Thinking…".into(), kind: MsgKind::Think, time: now(), collapsed: true, meta: None }, cx);
-
         self.pending_think = Some((task_id, think_id));
-        self.pending_content = None;
         self.save();
         cx.notify();
 
-        // The picked files belong to the prompt being sent, not to every prompt
-        // after it. A text file always travels as text. An image travels two
-        // ways: the agent loop accepts only a string, so it gets the data URL
-        // inlined, while the engine gets a real image part — the only shape
-        // whose pixels reach the model. An engine that has said it is text-only
-        // gets the name and the size, never a base64 wall it would refuse.
-        let prompt = text;
-        let mut notes = String::new();
-        let mut urls = String::new();
-        let mut images: Vec<serde_json::Value> = Vec::new();
+        let mut prompt = text;
         for path in &atts {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "file".to_string());
@@ -2611,267 +2620,16 @@ impl App {
             let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
             let shown = format!("{name} ({})", human_size(size));
             if mime.starts_with("image/") {
-                if self.engine.vision == Some(false) {
-                    notes.push_str(&format!("\n\n[attached image {shown} — the engine reports no image input, so this file's pixels cannot reach the model]"));
-                } else if let Ok(bytes) = std::fs::read(path) {
+                if let Ok(bytes) = std::fs::read(path) {
                     use base64::Engine as _;
                     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                    notes.push_str(&format!("\n\n[attached image {shown}]"));
-                    urls.push_str(&format!("\ndata:{mime};base64,{b64}"));
-                    images.push(serde_json::json!({
-                        "type": "image_url",
-                        "image_url": { "url": format!("data:{mime};base64,{b64}") }
-                    }));
+                    prompt.push_str(&format!("\n\n[attached image {shown}]\ndata:{mime};base64,{b64}"));
                 }
             } else if let Ok(content) = std::fs::read_to_string(path) {
-                notes.push_str(&format!("\n\n[attached file {shown}]\n{content}"));
+                prompt.push_str(&format!("\n\n[attached file {shown}]\n{content}"));
             }
         }
-        let text = format!("{prompt}{notes}{urls}");
-
-        // The Rust task service is canonical for new prompts. The legacy core
-        // lane remains available only when the Rust service is not running.
-        if self.rust_up {
-            self.dispatch_rust(text, task_id, backend_id);
-            return;
-        }
-        if self.core_up {
-            self.dispatch_core(text, task_id);
-            return;
-        }
-        // With neither service answering, the engine alone can still reply. It
-        // fronts every run, so a bare engine is a degraded but honest chat: no
-        // tools, no gating, no files — and the rail keeps reporting the backend
-        // offline rather than pretending otherwise.
-        if !self.backend_ok && self.engine.up {
-            self.line = "Only the engine answers here: this is a chat, so nothing runs or writes files until an agent service is up.".to_string();
-            let spoken = format!("{prompt}{notes}");
-            self.dispatch_engine(self.engine_turn(uid, &spoken, images), task_id);
-            return;
-        }
-
-        let url = self.server_url.clone();
-        let tx = self.response_tx.clone();
-        std::thread::spawn(move || {
-            let client = CodingAgentClient::with_base(url);
-
-            if client.health().is_none() {
-                let _ = tx.send(BackendResponse::Offline);
-                return;
-            }
-
-            let bt = match backend_id {
-                Some(id) if client.send_message(&id, &text).is_ok() => id,
-                _ => {
-                    let task = match client.create_task(&text, Some(&text), "local", None) {
-                        Ok(t) => t,
-                        Err(e) => { let _ = tx.send(BackendResponse::Error(e)); return; }
-                    };
-                    let id = task.id.clone();
-                    let _ = tx.send(BackendResponse::TaskCreated { task_id, backend_id: id.clone() });
-                    if let Err(e) = client.start_task(&id) {
-                        let _ = tx.send(BackendResponse::Error(e));
-                        return;
-                    }
-                    if let Err(e) = client.send_message(&id, &text) {
-                        let _ = tx.send(BackendResponse::Failed(e));
-                        return;
-                    }
-                    id
-                }
-            };
-
-            // SSE reader: live reasoning/content/tool deltas for this task.
-            let cancel = Arc::new(AtomicBool::new(false));
-            {
-                let cancel = cancel.clone();
-                let bt = bt.clone();
-                let tx = tx.clone();
-                let sse_client = client.clone();
-                std::thread::spawn(move || {
-                    let _ = sse_client.subscribe_events(&cancel, move |ev| {
-                        if ev.task_id.as_deref() != Some(bt.as_str()) { return; }
-                        match ev.event_type.as_str() {
-                            "MessageStreamed" => {
-                                let Some(payload) = &ev.payload else { return };
-                                let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                                if text.is_empty() { return; }
-                                match payload.get("kind").and_then(|k| k.as_str()) {
-                                    Some("reasoning") => { let _ = tx.send(BackendResponse::ThinkDelta(text.to_string())); }
-                                    Some("content") => { let _ = tx.send(BackendResponse::ContentDelta(text.to_string())); }
-                                    _ => {}
-                                }
-                            }
-                            "ToolStarted" => {
-                                let title = ev.payload.as_ref()
-                                    .and_then(|p| p.get("name").and_then(|n| n.as_str()))
-                                    .unwrap_or("Working").to_string();
-                                let tool_id = ev.payload.as_ref()
-                                    .and_then(|p| p.get("id").and_then(|n| n.as_str()))
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| ev.event_id.clone());
-                                let _ = tx.send(BackendResponse::ActionStarted { tool_id, title });
-                            }
-                            "ToolCompleted" | "ToolProgressUpdated" => {
-                                let Some(payload) = &ev.payload else { return };
-                                let tool_id = payload.get("id").and_then(|n| n.as_str())
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| ev.event_id.clone());
-                                let detail = payload.get("result").and_then(|v| v.as_str())
-                                    .or_else(|| payload.get("detail").and_then(|v| v.as_str()))
-                                    .unwrap_or("").to_string();
-                                let duration = payload.get("duration_ms").and_then(|v| v.as_u64())
-                                    .map(|ms| format!("{ms} ms"));
-                                let _ = tx.send(BackendResponse::ActionDone { tool_id, duration, detail });
-                            }
-                            _ => {}
-                        }
-                    });
-                });
-            }
-
-            // Terminal watcher: authoritative status + final message.
-            let mut attempts = 0usize;
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                attempts += 1;
-                if let Some(task) = client.get_task(&bt) {
-                    if task.status == "Complete" || task.status == "Failed" {
-                        cancel.store(true, Ordering::Relaxed);
-                        let final_text = task.messages.iter().rev()
-                            .find(|m| m.role == "Fennec")
-                            .map(|m| m.content.as_text())
-                            .unwrap_or_default();
-                        let _ = tx.send(BackendResponse::Complete { task_id, status: task.status, final_text });
-                        return;
-                    }
-                }
-                if attempts > 900 {
-                    cancel.store(true, Ordering::Relaxed);
-                    let _ = tx.send(BackendResponse::Complete {
-                        task_id, status: "Failed".into(),
-                        final_text: "Timed out waiting for the backend to finish.".into(),
-                    });
-                    return;
-                }
-            }
-        });
-    }
-
-    fn dispatch_rust(&self, text: String, task_id: u64, backend_id: Option<String>) {
-        let url = self.server_url.clone();
-        let tx = self.response_tx.clone();
-        std::thread::spawn(move || {
-            let client = CodingAgentClient::with_base(url);
-            if client.health().is_none() {
-                let _ = tx.send(BackendResponse::Offline);
-                return;
-            }
-
-            let existing = backend_id.filter(|id| client.get_task(id).is_some());
-            let (backend_task_id, created) = match existing {
-                Some(id) => {
-                    if let Err(error) = client.send_message(&id, &text) {
-                        let _ = tx.send(BackendResponse::Error(error));
-                        return;
-                    }
-                    (id, false)
-                }
-                None => {
-                    let task = match client.create_task(&text, Some(&text), "local", None) {
-                        Ok(task) => task,
-                        Err(error) => {
-                            let _ = tx.send(BackendResponse::Error(error));
-                            return;
-                        }
-                    };
-                    let id = task.id.clone();
-                    if let Err(error) = client.start_task(&id) {
-                        let _ = tx.send(BackendResponse::Error(error));
-                        return;
-                    }
-                    if let Err(error) = client.send_message(&id, &text) {
-                        let _ = tx.send(BackendResponse::Error(error));
-                        return;
-                    }
-                    (id, true)
-                }
-            };
-            if created {
-                let _ = tx.send(BackendResponse::TaskCreated {
-                    task_id,
-                    backend_id: backend_task_id.clone(),
-                });
-            }
-
-            let cancel = Arc::new(AtomicBool::new(false));
-            {
-                let cancel = cancel.clone();
-                let tx = tx.clone();
-                let stream_client = client.clone();
-                let stream_task_id = backend_task_id.clone();
-                std::thread::spawn(move || {
-                    let _ = stream_client.subscribe_events(&cancel, move |event| {
-                        if event.task_id.as_deref() != Some(stream_task_id.as_str()) {
-                            return;
-                        }
-                        let Some(payload) = event.payload.as_ref() else { return };
-                        match event.event_type.as_str() {
-                            "MessageStreamed" => {
-                                let Some(text) = payload.get("text").and_then(|v| v.as_str()) else { return };
-                                if text.is_empty() { return; }
-                                match payload.get("kind").and_then(|v| v.as_str()) {
-                                    Some("reasoning") => { let _ = tx.send(BackendResponse::ThinkDelta(text.to_string())); }
-                                    Some("content") => { let _ = tx.send(BackendResponse::ContentDelta(text.to_string())); }
-                                    _ => {}
-                                }
-                            }
-                            "TaskStatusChanged" if payload.get("status").and_then(|v| v.as_str()) == Some("complete") => {}
-                            "ToolStarted" => {
-                                let tool_id = payload.get("id").and_then(|v| v.as_str()).unwrap_or(&event.event_id).to_string();
-                                let title = payload.get("name").and_then(|v| v.as_str()).unwrap_or("Working").to_string();
-                                let _ = tx.send(BackendResponse::ActionStarted { tool_id, title });
-                            }
-                            "ToolCompleted" | "ToolProgressUpdated" => {
-                                let tool_id = payload.get("id").and_then(|v| v.as_str()).unwrap_or(&event.event_id).to_string();
-                                let detail = payload.get("result").and_then(|v| v.as_str())
-                                    .or_else(|| payload.get("detail").and_then(|v| v.as_str()))
-                                    .unwrap_or("").to_string();
-                                let duration = payload.get("duration_ms").and_then(|v| v.as_u64()).map(|ms| format!("{ms} ms"));
-                                let _ = tx.send(BackendResponse::ActionDone { tool_id, duration, detail });
-                            }
-                            _ => {}
-                        }
-                    });
-                });
-            }
-
-            let mut attempts = 0usize;
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(350));
-                attempts += 1;
-                if let Some(task) = client.get_task(&backend_task_id) {
-                    if matches!(task.status.as_str(), "Complete" | "Failed" | "Cancelled") {
-                        cancel.store(true, Ordering::Relaxed);
-                        let final_text = task.messages.iter().rev()
-                            .find(|message| message.role == "Fennec")
-                            .map(|message| message.content.as_text())
-                            .unwrap_or_default();
-                        let _ = tx.send(BackendResponse::Complete { task_id, status: task.status, final_text });
-                        return;
-                    }
-                }
-                if attempts > 900 {
-                    cancel.store(true, Ordering::Relaxed);
-                    let _ = tx.send(BackendResponse::Complete {
-                        task_id,
-                        status: "Failed".into(),
-                        final_text: "Timed out waiting for the Rust backend to finish.".into(),
-                    });
-                    return;
-                }
-            }
-        });
+        self.dispatch_core(prompt, task_id);
     }
 
     /// The directory to hand the loop for the active task. The loop refuses
@@ -2965,6 +2723,17 @@ impl App {
                 replay = false;
                 let _ = tx.send(BackendResponse::Core(CoreEvent::Replay { task_id }));
             }
+            // An unrecognised status is not a completed run. Refuse the poll
+            // explicitly instead of silently treating a malformed response as done.
+            let Some(status) = v["status"].as_str().filter(|status| {
+                matches!(*status, "running" | "done" | "error" | "cancelled")
+            }) else {
+                let _ = tx.send(BackendResponse::Core(CoreEvent::Refused {
+                    task_id,
+                    error: "fennec-core returned no valid session status; the supervised session may be lost".into(),
+                }));
+                return;
+            };
             let steps = v["steps"].as_array().cloned().unwrap_or_default();
             // Steps first: a card this round sent has to exist before the
             // pending list says which cards are live.
@@ -2977,7 +2746,7 @@ impl App {
             // `pending` is what the loop still holds. A service that reports
             // no list is not the same as an empty one — except once the run
             // is over, when it cannot be waiting on anyone.
-            let finished = v["status"].as_str().map(|s| s != "running").unwrap_or(true);
+            let finished = status != "running";
             match (v["pending"].as_array(), finished) {
                 (Some(list), _) => {
                     let ids = list.iter().filter_map(serde_json::Value::as_str)
@@ -2990,8 +2759,7 @@ impl App {
                 (None, false) => {}
             }
             if finished {
-                let status = v["status"].as_str().unwrap_or("done").to_string();
-                let _ = tx.send(BackendResponse::Core(CoreEvent::Status { task_id, status }));
+                let _ = tx.send(BackendResponse::Core(CoreEvent::Status { task_id, status: status.to_string() }));
                 return;
             }
         }
@@ -3003,90 +2771,65 @@ impl App {
     /// thinking at shutdown freezes mid-thought and the question it stopped on
     /// has no card left to answer from. Bounded, because a service that never
     /// answers is not a run to resume — the history stays as it was.
-    fn resume_runs(&self) {
+    fn resume_runs(&mut self) {
         if self.resume.is_empty() {
             return;
         }
+        if let Some(worker) = &self.resume_worker {
+            if worker.done.load(Ordering::Acquire) {
+                self.resume_worker = None;
+            } else {
+                worker.trigger.store(true, Ordering::Release);
+                return;
+            }
+        }
         let want = self.resume.clone();
         let (core, tx) = (self.core.clone(), self.response_tx.clone());
-        std::thread::spawn(move || {
+        let resume_in_flight = Arc::new(AtomicBool::new(true));
+        let resume_done = Arc::new(AtomicBool::new(false));
+        let in_flight = resume_in_flight.clone();
+        let done = resume_done.clone();
+        std::thread::spawn(move || loop {
+            if !in_flight.swap(false, Ordering::AcqRel) {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                continue;
+            }
+            if done.load(Ordering::Acquire) {
+                return;
+            }
             for _ in 0..8 {
-                if core.health().is_none() {
+                // Health is not a capability probe. A run is resumed only after
+                // core advertises the supervised contract.
+                if probe_capabilities(&core.base).is_none_or(|caps| !supports_coding(&caps)) {
                     std::thread::sleep(std::time::Duration::from_millis(1000));
                     continue;
                 }
                 let live = core.sessions();
-                for (task_id, sid) in want {
+                for (task_id, sid) in want.clone() {
                     if live.iter().any(|s| s["id"].as_str() == Some(sid.as_str())) {
                         let _ = tx.send(BackendResponse::Core(CoreEvent::Resume { task_id, sid }));
+                    } else {
+                        let _ = tx.send(BackendResponse::Core(CoreEvent::Refused {
+                            task_id,
+                            error: format!("fennec-core no longer holds supervised session {sid}; it was not resumed"),
+                        }));
                     }
                 }
+                done.store(true, Ordering::Release);
                 return;
             }
+            for (task_id, sid) in want.clone() {
+                let _ = tx.send(BackendResponse::Core(CoreEvent::Refused {
+                    task_id,
+                    error: format!("fennec-core did not advertise supervised coding in time; session {sid} was not resumed"),
+                }));
+            }
+            done.store(true, Ordering::Release);
+            return;
         });
-    }
-
-    /// The conversation as the engine sees it: what was said, in order, with
-    /// this prompt last. The calls and the thoughts are this window's
-    /// bookkeeping — the model never saw them, so neither does it hear them.
-    fn engine_turn(&self, skip_uid: u64, prompt: &str, images: Vec<serde_json::Value>) -> serde_json::Value {
-        let mut turns: Vec<serde_json::Value> = Vec::new();
-        if let Some(t) = self.task() {
-            for m in &t.msgs {
-                if m.id == skip_uid { continue; }
-                let role = match m.kind {
-                    MsgKind::User => "user",
-                    MsgKind::Result => "assistant",
-                    _ => continue,
-                };
-                turns.push(serde_json::json!({ "role": role, "content": m.content }));
-            }
-        }
-        let said = if images.is_empty() {
-            serde_json::json!({ "role": "user", "content": prompt })
-        } else {
-            let mut parts = vec![serde_json::json!({ "type": "text", "text": prompt })];
-            parts.extend(images);
-            serde_json::json!({ "role": "user", "content": parts })
-        };
-        turns.push(said);
-        serde_json::Value::Array(turns)
-    }
-
-    /// Ask the engine itself, and stream its answer into the same delta channel
-    /// the Rust service feeds, so a reply from a bare engine reads like any
-    /// other. Nothing gates or writes here: this lane answers questions only.
-    fn dispatch_engine(&self, messages: serde_json::Value, task_id: u64) {
-        let engine = Engine { base: self.engine_url.clone(), key: self.api_key.clone() };
-        let tx = self.response_tx.clone();
-        std::thread::spawn(move || {
-            let (ltx, lrx) = std::sync::mpsc::channel();
-            // Hanging up is the engine's cancellation signal, so the flag has to
-            // outlive the loop below: a channel the reader abandons stops the
-            // stream instead of leaving a generation running for nobody.
-            let cancel = Arc::new(AtomicBool::new(false));
-            {
-                let cancel = cancel.clone();
-                std::thread::spawn(move || engine.chat_stream(&messages, 512, &ltx, &cancel));
-            }
-            for d in lrx {
-                match d {
-                    ChatDelta::Reasoning(r) => { let _ = tx.send(BackendResponse::ThinkDelta(r)); }
-                    ChatDelta::Content(c) => { let _ = tx.send(BackendResponse::ContentDelta(c)); }
-                    // The answer arrived as deltas, so there is no final text to
-                    // hand over — passing one would overwrite what streamed in.
-                    ChatDelta::Done => {
-                        cancel.store(true, Ordering::Relaxed);
-                        let _ = tx.send(BackendResponse::Complete { task_id, status: "Complete".into(), final_text: String::new() });
-                        return;
-                    }
-                    ChatDelta::Failed(e) => {
-                        cancel.store(true, Ordering::Relaxed);
-                        let _ = tx.send(BackendResponse::Failed(e));
-                        return;
-                    }
-                }
-            }
+        self.resume_worker = Some(ResumeWorker {
+            trigger: resume_in_flight,
+            done: resume_done,
         });
     }
 
@@ -3094,8 +2837,12 @@ impl App {
     /// the window. The outcome comes back as an `Answered` event: the loop only
     /// accepts a question it still holds, and a 404 is not the same as a yes.
     fn answer(&mut self, task_id: u64, approval_id: String, decision: String) {
+        if !self.coding_ready() {
+            self.line = coding_unavailable_message(&self.core.base);
+            return;
+        }
         let Some(sid) = self.core_sid_of(task_id) else {
-            self.line = "This run has no supervised session on the agent loop, so there is nothing to answer."
+            self.line = "Not answered: this run has no supervised session on fennec-core."
                 .to_string();
             return;
         };
@@ -3112,11 +2859,26 @@ impl App {
     /// holding go expired with it, which `Pending` reports on the next poll.
     fn stop_run(&mut self, task_id: u64) {
         let Some(sid) = self.core_sid_of(task_id) else {
-            self.set_task_status(task_id, "Idle");
+            // No supervised id means there is nothing this client can cancel.
+            // Leave the visible state untouched and say the cancellation failed.
+            self.line = "Not cancelled: this task has no supervised fennec-core session to stop."
+                .to_string();
             return;
         };
-        let core = self.core.clone();
-        std::thread::spawn(move || { let _ = core.cancel(&sid); });
+        if !self.coding_ready() {
+            self.line = "Not cancelled: fennec-core supervised capability is currently unavailable."
+                .to_string();
+            return;
+        }
+        let (core, tx) = (self.core.clone(), self.response_tx.clone());
+        std::thread::spawn(move || {
+            if let Err(error) = core.cancel(&sid) {
+                let _ = tx.send(BackendResponse::Core(CoreEvent::Refused {
+                    task_id,
+                    error: format!("cancel did not land: {error}"),
+                }));
+            }
+        });
     }
 
     /// The supervised session a task is running under, when it has one. Only
@@ -3138,7 +2900,6 @@ impl App {
             }
         }
         self.pending_think = None;
-        self.pending_content = None;
     }
 
     /// Forget one call's live line, because its card just closed.
@@ -3175,6 +2936,23 @@ impl App {
                 }
             }
             CoreEvent::Resume { task_id, sid } => {
+                self.resume.retain(|(id, _)| *id != task_id);
+                let Some(task) = self.tasks.iter().find(|task| task.id == task_id) else { return };
+                let Some(saved_sid) = task.core_sid.as_deref() else { return };
+                if saved_sid != sid {
+                    let _ = self.response_tx.send(BackendResponse::Core(CoreEvent::Refused {
+                        task_id,
+                        error: "fennec-core returned a different session id; the saved run was not resumed".into(),
+                    }));
+                    return;
+                }
+                if !self.coding_ready() {
+                    let _ = self.response_tx.send(BackendResponse::Core(CoreEvent::Refused {
+                        task_id,
+                        error: "fennec-core no longer advertises supervised coding; the session was not resumed".into(),
+                    }));
+                    return;
+                }
                 // The loop is working on this run right now, so its steps are
                 // the live record and this window's copy is whatever the last
                 // process happened to see. `replay` says so; the service's own
@@ -3359,10 +3137,8 @@ impl App {
                             }
                         }
                     }
-                    if !self.queued.is_empty() {
-                        let next = self.queued.remove(0).text;
-                        self.save();
-                        self.dispatch(next, cx);
+                    if self.coding_ready() {
+                        self.drain_coding_queue(cx);
                     }
                 }
             }
@@ -3371,6 +3147,9 @@ impl App {
                 self.push_core_msg(task_id, MsgKind::Result,
                     format!("The agent loop refused this run: {error}"), None);
                 self.set_task_status(task_id, "Failed");
+                // A lost core session ends the old run, so queued work may start
+                // only through the same supervised-capability gate.
+                self.drain_coding_queue(cx);
             }
         }
         self.save();
@@ -3568,7 +3347,7 @@ fn task_dot(status: &str, t: &gpui_kit::component::Theme) -> Hsla {
     match status {
         "Running" | "Planning" => t.accent,
         "Complete" => t.green,
-        "Failed" => t.red,
+        "Failed" | "Unavailable" => t.red,
         "Queued" => t.blue,
         _ => t.muted_foreground,
     }
@@ -3671,8 +3450,8 @@ impl App {
 
     fn topbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
-        let status_text = if self.backend_ok { "Backend connected" } else { "Backend offline" };
-        let status_color = if self.backend_ok { t.green } else { t.red };
+        let status_text = if self.coding_ready() { "Supervised core ready" } else { "Coding unavailable" };
+        let status_color = if self.coding_ready() { t.green } else { t.red };
         
         div().h(px(56.0)).flex_shrink_0().px_4().flex().items_center().justify_between()
             .bg(fennec_ui::theme::panel()).border_b_1().border_color(t.border)
@@ -4469,12 +4248,15 @@ impl App {
         let note_folder_input = cx.new(|cx| InputState::new(window, cx));
         let note_content_input = cx.new(|cx| InputState::new(window, cx));
         let note_overwrite = Rc::new(Cell::new(false));
-        let backend_url = self.server_url.clone();
+        let rust_url = self.rust_url.clone();
+        let core_base = self.core.base.clone();
         let response_tx = self.response_tx.clone();
         let github = self.github.clone();
         let github_repositories = self.github_repositories.clone();
         let obsidian = self.obsidian.clone();
-        let capabilities = self.capabilities.clone();
+        let core_capabilities = self.core_capabilities.clone();
+        let rust_capabilities = self.rust_capabilities.clone();
+        let coding_ready = self.coding_ready();
         let weak = cx.entity().downgrade();
         let current_theme: Rc<RefCell<String>> = Rc::new(RefCell::new(self.theme.clone()));
         // The content builder can re-run when the dialog layer is rebuilt, so the
@@ -4491,12 +4273,15 @@ impl App {
             let note_folder_input = note_folder_input.clone();
             let note_content_input = note_content_input.clone();
             let note_overwrite = note_overwrite.clone();
-            let backend_url = backend_url.clone();
+            let rust_url = rust_url.clone();
+            let core_base = core_base.clone();
             let response_tx = response_tx.clone();
             let github = github.clone();
             let github_repositories = github_repositories.clone();
             let obsidian = obsidian.clone();
-            let capabilities = capabilities.clone();
+            let core_capabilities = core_capabilities.clone();
+            let rust_capabilities = rust_capabilities.clone();
+            let coding_ready = coding_ready;
             let weak = weak.clone();
             let current_theme = current_theme.clone();
             let settings_path_for_theme = settings_path_for_theme.clone();
@@ -4517,12 +4302,15 @@ impl App {
                     let note_folder_input = note_folder_input.clone();
                     let note_content_input = note_content_input.clone();
                     let note_overwrite = note_overwrite.clone();
-                    let backend_url = backend_url.clone();
+                    let rust_url = rust_url.clone();
+                    let core_base = core_base.clone();
                     let response_tx = response_tx.clone();
                     let github = github.clone();
                     let github_repositories = github_repositories.clone();
                     let obsidian = obsidian.clone();
-                    let capabilities = capabilities.clone();
+                    let core_capabilities = core_capabilities.clone();
+                    let rust_capabilities = rust_capabilities.clone();
+                    let coding_ready = coding_ready;
                     let weak = weak.clone();
                     let current_theme = current_theme.clone();
                     let settings_path_for_theme = settings_path_for_theme.clone();
@@ -4716,7 +4504,7 @@ impl App {
                                                         let note_folder_input = note_folder_input.clone();
                                                         let note_content_input = note_content_input.clone();
                                                         let note_overwrite = note_overwrite.clone();
-                                                        let backend_url = backend_url.clone();
+                                                        let rust_url = rust_url.clone();
                                                         let response_tx = response_tx.clone();
                                                         Button::new("obsidian-write").primary().small().label("Write to Obsidian")
                                                             .on_click(move |_, window, cx| {
@@ -4729,10 +4517,10 @@ impl App {
                                                                 }
                                                                 let folder = (!folder.is_empty()).then_some(folder);
                                                                 let overwrite = note_overwrite.get();
-                                                                let backend_url = backend_url.clone();
+                                                                let rust_url = rust_url.clone();
                                                                 let response_tx = response_tx.clone();
                                                                 std::thread::spawn(move || {
-                                                                    let result = CodingAgentClient::with_base(backend_url)
+                                                                    let result = CodingAgentClient::with_base(rust_url)
                                                                         .obsidian_write_note(&title, &content, folder.as_deref(), overwrite)
                                                                         .map(|note| note.path);
                                                                     let _ = response_tx.send(BackendResponse::ObsidianWrite(result));
@@ -4844,10 +4632,25 @@ impl App {
                                                     .child(Label::new("Connect n8n or another MCP host to the local Fennec tools without Node.js or stored credentials.")
                                                         .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground)))
                                                 .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                                    .child(Label::new("Coding backend").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
+                                                    .child(Label::new(format!("fennec-core: {core_base}"))
+                                                        .w(px(PROSE_W)).text_size(px(13.0)).text_color(if coding_ready { cx.theme().green } else { cx.theme().red }))
+                                                    .child(Label::new(format!("Rust chat/integrations: {rust_url}"))
+                                                        .w(px(PROSE_W)).text_size(px(13.0)).text_color(cx.theme().muted_foreground))
+                                                    .child(Label::new(if coding_ready {
+                                                        "Supervised coding is advertised by /api/capabilities."
+                                                    } else {
+                                                        "Coding is unavailable. Start fennec-core and advertise supervised-agent, tool-execution, per-call-approvals, and agent-polling."
+                                                    }).w(px(PROSE_W)).text_size(px(11.0)).text_color(if coding_ready { cx.theme().muted_foreground } else { cx.theme().red })))
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
                                                     .child(Label::new("Backend capability contract").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
-                                                    .child(Label::new(capabilities.as_ref().map(|c| format!("{} {} · protocol {}", c.backend, c.version, c.protocol_version)).unwrap_or_else(|| "Backend capabilities are unavailable.".into()))
-                                                        .w(px(PROSE_W)).text_size(px(13.0)).text_color(if capabilities.is_some() { cx.theme().green } else { cx.theme().muted_foreground }))
-                                                    .child(Label::new(capabilities.as_ref().map(|c| c.features.join(" · ")).unwrap_or_else(|| "Start fennec-agent to load integration capabilities.".into()))
+                                                    .child(Label::new(format!("fennec-core: {}", core_capabilities.as_ref().map(|c| format!("{} {} · protocol {} · {}", c.backend, c.version, c.protocol_version, if supports_coding(c) { "coding ready" } else { "coding unavailable" })).unwrap_or_else(|| "capabilities unavailable".into())))
+                                                        .w(px(PROSE_W)).text_size(px(13.0)).text_color(if core_capabilities.as_ref().is_some_and(supports_coding) { cx.theme().green } else { cx.theme().muted_foreground }))
+                                                    .child(Label::new(core_capabilities.as_ref().map(|c| c.features.join(" · ")).unwrap_or_else(|| "Start fennec-core to advertise supervised coding.".into()))
+                                                        .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground))
+                                                    .child(Label::new(format!("Rust service: {}", rust_capabilities.as_ref().map(|c| format!("{} {} · protocol {}", c.backend, c.version, c.protocol_version)).unwrap_or_else(|| "capabilities unavailable · chat/integration service".into())))
+                                                        .w(px(PROSE_W)).text_size(px(13.0)).text_color(if rust_capabilities.is_some() { cx.theme().green } else { cx.theme().muted_foreground }))
+                                                    .child(Label::new(rust_capabilities.as_ref().map(|c| c.features.join(" · ")).unwrap_or_else(|| "Start the Rust service at 127.0.0.1:8788 for chat/integrations.".into()))
                                                         .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground)))
                                                 .into_any_element(),
                                         ],
@@ -4944,7 +4747,7 @@ impl App {
         self.fm.loaded = true;
         self.fm.rows.clear();
         self.fm.note = "reading…".to_string();
-        let url = self.server_url.clone();
+        let url = self.rust_url.clone();
         let tx = self.response_tx.clone();
         let workspace = workspace_param(&self.core_workspace());
         std::thread::spawn(move || {
@@ -4981,7 +4784,7 @@ impl App {
         });
         // The block is pinned above the scrolling list, so it is on screen the
         // moment a file opens, however far the listing below it is scrolled.
-        let url = self.server_url.clone();
+        let url = self.rust_url.clone();
         let tx = self.response_tx.clone();
         let workspace = workspace_param(&self.core_workspace());
         std::thread::spawn(move || {
@@ -5005,7 +4808,7 @@ impl App {
         self.br.meta = "reading…".to_string();
         self.br.title.clear();
         self.br.body.clear();
-        let url = self.server_url.clone();
+        let url = self.rust_url.clone();
         let tx = self.response_tx.clone();
         std::thread::spawn(move || {
             let client = CodingAgentClient::with_base(url);
@@ -5194,7 +4997,7 @@ impl App {
                 .child(insp_head("Environment", None, &t))
                 .child(self.row("Repository", &repo, false, cx))
                 .child(self.row("Branch", &branch, !self.branch.is_empty(), cx))
-                .child(self.row("Backend", if self.backend_ok { "Connected" } else { "Offline" }, self.backend_ok, cx))
+                .child(self.row("Coding backend", if self.coding_ready() { "fennec-core ready" } else { "fennec-core unavailable" }, self.coding_ready(), cx))
                 .children(outlet_rows_ui));
 
         let files = div().flex().flex_col().gap_3()
@@ -5721,5 +5524,91 @@ mod pane_tests {
         assert_eq!(decode_page(json!({ "ok": false, "error": "dns failed" })).unwrap_err(), "dns failed");
         // A pane that has never read anything has no history to walk back over.
         assert!(BrState::default().hist.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use crate::{
+        coding_route, migrate_legacy_base, next_coding_prompt, resolve_backend_bases,
+        supports_coding, BackendBases, CodingRoute, QueueEntry, QueueOwner, Settings,
+    };
+    use fennec_client::coding_agent::BackendCapabilities;
+    use std::collections::HashMap;
+
+    fn capabilities(backend: &str, features: &[&str]) -> BackendCapabilities {
+        BackendCapabilities {
+            backend: backend.into(),
+            implementation: if backend == "fennec-core" { "python-supervised-loop" } else { "rust-axum" }.into(),
+            protocol_version: 1,
+            version: "1.0.0".into(),
+            features: features.iter().map(|feature| (*feature).to_string()).collect(),
+        }
+    }
+
+    fn core() -> BackendCapabilities {
+        capabilities("fennec-core", &[
+            "supervised-agent", "tool-execution", "per-call-approvals", "agent-polling",
+        ])
+    }
+
+    #[test]
+    fn only_a_complete_core_contract_can_route_coding() {
+        let core = core();
+        let rust = capabilities("fennec-coding-agent", &["chat-only", "tasks"]);
+        assert_eq!(coding_route(Some(&core), Some(&rust)), CodingRoute::Core);
+        assert_eq!(coding_route(None, Some(&rust)), CodingRoute::Unavailable);
+        assert_eq!(coding_route(None, None), CodingRoute::Unavailable);
+
+        let mut partial = core.clone();
+        partial.features.retain(|feature| feature != "per-call-approvals");
+        assert_eq!(coding_route(Some(&partial), Some(&rust)), CodingRoute::Unavailable);
+        let mut wrong_protocol = core;
+        wrong_protocol.protocol_version = 2;
+        assert!(!supports_coding(&wrong_protocol));
+    }
+
+    #[test]
+    fn a_chat_only_rust_service_never_releases_the_queue() {
+        let queued = vec![QueueEntry { text: "write a file".into(), owner: QueueOwner::User }];
+        assert_eq!(next_coding_prompt(CodingRoute::Unavailable, false, &queued), None);
+        assert_eq!(next_coding_prompt(CodingRoute::Core, true, &queued), None);
+        assert_eq!(next_coding_prompt(CodingRoute::Core, false, &queued).as_deref(), Some("write a file"));
+    }
+
+    #[test]
+    fn explicit_urls_win_and_a_legacy_url_is_classified_by_capabilities() {
+        let settings = Settings {
+            server_url: Some("http://127.0.0.1:8799/".into()),
+            core_url: None,
+            rust_url: None,
+            ..Settings::default()
+        };
+        let environ = HashMap::from([
+            ("FENNEC_CORE_URL".into(), "http://127.0.0.1:8787".into()),
+            ("FENNEC_AGENT_URL".into(), "http://127.0.0.1:8788".into()),
+        ]);
+        let mut bases = resolve_backend_bases(&settings, &environ);
+        assert_eq!(bases.core, "http://127.0.0.1:8787");
+        assert_eq!(bases.rust, "http://127.0.0.1:8788");
+        assert!(bases.legacy.is_none());
+
+        bases = resolve_backend_bases(&settings, &HashMap::new());
+        assert!(migrate_legacy_base(&mut bases, &core()));
+        assert_eq!(bases.core, "http://127.0.0.1:8799");
+        assert!(bases.legacy.is_none());
+
+        bases = resolve_backend_bases(&settings, &HashMap::new());
+        let rust = capabilities("fennec-coding-agent", &["chat-only"]);
+        assert!(migrate_legacy_base(&mut bases, &rust));
+        assert_eq!(bases.rust, "http://127.0.0.1:8799");
+        assert_eq!(bases.core, crate::DEFAULT_CORE_URL);
+    }
+
+    #[test]
+    fn an_empty_saved_url_does_not_become_a_probe_target() {
+        let settings = Settings { server_url: Some("  ".into()), ..Settings::default() };
+        let bases: BackendBases = resolve_backend_bases(&settings, &HashMap::new());
+        assert!(bases.legacy.is_none());
     }
 }

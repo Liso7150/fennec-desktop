@@ -3,7 +3,7 @@ name: build-desktop
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    tags: ["v1.0.0"]
   workflow_dispatch:
 
 permissions:
@@ -37,14 +37,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Liso7150/fennec-core
+          ref: v1.0.0
           path: fennec-core
       - uses: actions/checkout@v4
         with:
           repository: Liso7150/fennec-economy
+          ref: v1.0.0
           path: fennec-economy
       - uses: actions/checkout@v4
         with:
           repository: Liso7150/fennec-ui
+          ref: v1.0.0
           path: fennec-ui
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -68,44 +71,53 @@ jobs:
         working-directory: fennec-desktop
         run: cargo build --release --features gui
       - name: Package portable binaries
+        working-directory: fennec-desktop
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p dist
           python - "$VERSION" <<'PY'
-          import os, pathlib, sys, tarfile, zipfile
+          import os, pathlib, re, sys, tarfile, zipfile
           version = sys.argv[1]
           release = pathlib.Path("target/release")
           names = ["fennec-desktop-gui", "fennec-desktop"]
           if sys.platform == "win32":
               names = [name + ".exe" for name in names]
-          platform = f"{os.environ['RUNNER_OS'].lower()}-{os.environ['RUNNER_ARCH'].lower()}"
-          files = []
-          for name in names:
-              source = release / name
-              if source.is_file():
-                  files.append(source)
-          if not files:
-              raise SystemExit("no desktop binaries to package")
+          files = [release / name for name in names]
+          missing = [str(source) for source in files if not source.is_file()]
+          if missing:
+              raise SystemExit("required desktop binaries missing: " + ", ".join(missing))
+          runner_os = os.environ["RUNNER_OS"].lower()
+          runner_arch = os.environ["RUNNER_ARCH"].upper()
+          arch = {"X64": "x86_64", "ARM64": "aarch64"}.get(runner_arch)
+          if arch is None:
+              raise SystemExit(f"unsupported RUNNER_ARCH: {runner_arch}")
+          platform = f"{runner_os}-{arch}"
           if sys.platform == "win32":
               asset = pathlib.Path("dist") / f"FennecDesktop-{version}-{platform}.zip"
               with zipfile.ZipFile(asset, "w", zipfile.ZIP_DEFLATED) as archive:
                   for source in files:
                       archive.write(source, source.name)
+              extension = r"\.zip"
           else:
               asset = pathlib.Path("dist") / f"FennecDesktop-{version}-{platform}.tar.gz"
               with tarfile.open(asset, "w:gz") as archive:
                   for source in files:
                       archive.add(source, arcname=source.name)
+              extension = r"\.tar\.gz"
+          if re.fullmatch(rf"FennecDesktop-{re.escape(version)}-(windows|macos|linux)-(x86_64|aarch64){extension}", asset.name) is None:
+              raise SystemExit(f"invalid desktop asset name: {asset.name}")
+          if not asset.is_file():
+              raise SystemExit(f"desktop asset was not created: {asset}")
           print(asset)
           PY
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: fennec-desktop-${{ matrix.os }}
-          path: dist/*
+          path: fennec-desktop/dist/*
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/tags/v1.0.0'
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -117,7 +129,23 @@ jobs:
       - name: Publish checksums and release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           (cd dist && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          python - <<'PY'
+          import pathlib, re
+          root = pathlib.Path("dist")
+          assets = sorted(path.name for path in root.iterdir() if path.is_file() and path.name != "SHA256SUMS")
+          if not assets:
+              raise SystemExit("no release assets to checksum")
+          names = []
+          for line in (root / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+              match = re.fullmatch(r"([0-9a-f]{64}) [ *]([^/\\]+)", line)
+              if match is None:
+                  raise SystemExit(f"invalid checksum entry: {line!r}")
+              names.append(match.group(2))
+          if sorted(names) != assets:
+              raise SystemExit("SHA256SUMS entries do not match release asset basenames")
+          PY
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --notes "Fennec Desktop 1.0.0. Native Rust/GPUI build. See CHANGELOG.md for the full 0.9.0 to 1.0.0 record. Portable archives are unsigned; SAC remains off by user choice."
           gh release upload "$GITHUB_REF_NAME" dist/*
