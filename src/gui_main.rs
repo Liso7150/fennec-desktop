@@ -7,7 +7,10 @@
 // terminal in the taskbar would be a second app the user did not ask for.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use fennec_client::coding_agent::{CodingAgentClient, GithubAccountStatus};
+use fennec_client::coding_agent::{
+    BackendCapabilities, CodingAgentClient, GithubAccountStatus, GithubRepository,
+    GithubRepositoryStatus, ObsidianStatus,
+};
 use fennec_client::engine::{ChatDelta, Engine};
 use fennec_client::{git, outlet_rows, suite, Core, Outlet};
 
@@ -16,6 +19,7 @@ use fennec_ui::attention::{
     attention_badge, card_shows, gate_title, needs_attention, write_of_title,
 };
 use fennec_ui::confirm::{Confirm, open_confirm};
+use fennec_ui::icons::ui_icon;
 use fennec_ui::markdown::{artifact_badge, attachment_subtitle, diff_counts, rich_div};
 use fennec_ui::theme::{find_preset_index, theme_presets};
 use fennec_ui::timeline::{CallShape, GroupRow, block_open, block_title, clock, kind_of, live_stretch, reveal_text, short_text, unique_actions};
@@ -29,6 +33,7 @@ use gpui_kit::component::{
     label::Label,
     notification::Notification,
     scroll::ScrollableElement,
+    switch::Switch,
     Theme, ThemeMode,
 };
 use gpui_kit::prelude::*;
@@ -41,6 +46,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 const WARM_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
+const SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const MAX_STT_SECONDS: usize = 120;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct Msg {
@@ -490,12 +497,21 @@ struct Settings {
     font_size: Option<f32>,
     auto_save: Option<bool>,
     notifications: Option<bool>,
-    debug_mode: Option<bool>,
-    experimental_features: Option<bool>,
     allow_write: Option<bool>,
     allow_shell: Option<bool>,
     allow_web: Option<bool>,
     ask_each: Option<bool>,
+    // `default` keeps an older settings.json (which lacks these keys) parseable:
+    // without it every stored setting would fall back to its default at once.
+    #[serde(default)]
+    rail_width: Option<f32>,
+    #[serde(default)]
+    inspector_width: Option<f32>,
+    /// Which inspector view was open last. The PWA keeps the same choice under
+    /// the `fennec-insp-tab` key; a settings file from before the tabs exist
+    /// simply has no value, and the pane opens on Overview.
+    #[serde(default)]
+    insp_tab: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -506,6 +522,8 @@ struct Workspace {
     color: String,
     source_folders: Vec<String>,
     indexed: bool,
+    #[serde(default)]
+    github_repo: Option<String>,
 }
 
 impl Workspace {
@@ -517,6 +535,7 @@ impl Workspace {
             color: "orange".to_string(),
             source_folders: vec![],
             indexed: true,
+            github_repo: None,
         }
     }
 }
@@ -527,11 +546,40 @@ struct WorkspaceStore {
     active_id: Option<String>,
 }
 
+/// Which side pane a divider resizes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pane {
+    Rail,
+    Inspector,
+}
+
+impl Pane {
+    /// The same span the PWA's `paneLimits` gives each side pane.
+    fn clamp(self, w: f32) -> f32 {
+        match self {
+            Pane::Rail => w.clamp(180.0, 440.0),
+            Pane::Inspector => w.clamp(220.0, 560.0),
+        }
+    }
+
+    fn default_width(self) -> f32 {
+        match self {
+            Pane::Rail => 260.0,
+            Pane::Inspector => 300.0,
+        }
+    }
+}
+
 struct App {
     tasks: Vec<Task>,
     active: Option<u64>,
     queued: Vec<QueueEntry>,
     inspector: bool,
+    rail_width: f32,
+    inspector_width: f32,
+    /// The divider being dragged: which pane, the pointer's x at press, and the
+    /// pane's width then. Move events land on the root, not the divider.
+    pane_drag: Option<(Pane, f32, f32)>,
     attention_only: bool,
     /// What the user last clicked each action block to, keyed on its anchor
     /// message id. Absent means the block follows the rule: open while the run is
@@ -552,8 +600,6 @@ struct App {
     font_size: f32,
     auto_save: bool,
     notifications: bool,
-    debug_mode: bool,
-    experimental_features: bool,
     perm_dropdown_open: bool,
     model_dropdown_open: bool,
     stt_recording: bool,
@@ -583,6 +629,9 @@ struct App {
     outlets: Vec<Outlet>,
     outlets_known: bool,
     github: GithubAccountStatus,
+    github_repositories: GithubRepositoryStatus,
+    obsidian: ObsidianStatus,
+    capabilities: Option<BackendCapabilities>,
     /// Runs restored from history that the loop may still be working on: each
     /// is this window's task id and the session id it was started as. Consumed
     /// by the first resume attempt, whichever way it goes.
@@ -602,6 +651,11 @@ struct App {
     pending_send: Option<(String, std::time::Instant)>,
     workspaces: Vec<Workspace>,
     active_workspace_id: Option<String>,
+    /// Rows whose +/×/✎ buttons the pointer is over. The PWA reveals the same
+    /// buttons only on row hover, so the native rail hides them until then.
+    hovered_workspace_id: Option<String>,
+    hovered_task_id: Option<u64>,
+    hovered_ws_header: bool,
     workspaces_path: PathBuf,
     /// Engine health, model id, context and throughput, probed with the service.
     engine: EngineState,
@@ -611,11 +665,27 @@ struct App {
     pending_atts: Vec<PathBuf>,
     /// Git branch of the directory the runs work in.
     branch: String,
+    /// Input field for creating a new GitHub repository from the unbound banner.
+    repo_create_input: Entity<InputState>,
     /// Root of the Fennec suite on disk, discovered once at launch. The fallback
     /// working directory when neither a workspace nor the core names one.
     suite_root: PathBuf,
     /// The delivered file whose card the user clicked, shown in the right pane.
     open_file: Option<FileView>,
+    /// Which of the three inspector views is showing: the run's context, the
+    /// workspace's files, or a page read through the loop.
+    insp_tab: InspTab,
+    fm: FmState,
+    br: BrState,
+    br_input: Entity<InputState>,
+    /// Listing reads and file reads answer out of order, so each carries the
+    /// number its own request took and a late one is dropped rather than painting
+    /// a folder or a panel the user has already moved off.
+    fm_seq: usize,
+    file_seq: usize,
+    br_seq: usize,
+    save_pending: Cell<bool>,
+    last_save: Cell<std::time::Instant>,
 }
 
 /// What the right pane holds after a delivered-file card is clicked. The text is
@@ -629,6 +699,213 @@ struct FileView {
     /// Line count and size, or the reason there is nothing to show.
     meta: String,
     failed: bool,
+    /// Set instead of `body` when the file is a picture. Decoded off the UI
+    /// thread, because a bitmap costs as much RAM as the file had bytes.
+    image: Option<Arc<Image>>,
+}
+
+/// One view of the right pane. The panel was one column of run context; Files
+/// and Browser each want the whole column, so context became a tab instead of a
+/// fourth section nobody scrolls to. Same three names the PWA puts in its
+/// `insp-tab-*` buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InspTab {
+    Overview,
+    Files,
+    Browser,
+}
+
+impl InspTab {
+    const ALL: [InspTab; 3] = [InspTab::Overview, InspTab::Files, InspTab::Browser];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Files => "Files",
+            Self::Browser => "Browser",
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Files => "files",
+            Self::Browser => "browser",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tab| tab.as_str() == value)
+    }
+}
+
+/// One row of the Files listing, as the workspace jail returns it.
+#[derive(Debug)]
+struct FmRow {
+    name: String,
+    is_dir: bool,
+    size: u64,
+}
+
+/// A listing that answered: the root the jail resolved to, and its rows.
+#[derive(Debug)]
+struct FmListing {
+    root: String,
+    rows: Vec<FmRow>,
+}
+
+/// A preview that answered: the size line and either the text or the picture.
+/// Where the file is comes from the pane, which knows the root — the route
+/// echoes the relative path it was handed, not an absolute one.
+#[derive(Debug)]
+struct FileRead {
+    meta: String,
+    body: String,
+    image: Option<Arc<Image>>,
+}
+
+/// A page the loop's reader handed back.
+#[derive(Debug)]
+struct BrPage {
+    url: String,
+    status: u16,
+    title: String,
+    text: String,
+    truncated: bool,
+}
+
+/// What the Files tab holds. `path` is `.` until a workspace names a folder,
+/// which is the jail's own root; `note` says why there are no rows.
+#[derive(Debug)]
+struct FmState {
+    path: String,
+    root: String,
+    rows: Vec<FmRow>,
+    note: String,
+    loaded: bool,
+}
+
+impl Default for FmState {
+    fn default() -> Self {
+        Self { path: ".".into(), root: String::new(), rows: Vec::new(), note: String::new(), loaded: false }
+    }
+}
+
+/// What the Browser tab holds. gpui draws no HTML and a webview is out, so this
+/// pane shows the page as the text the loop's reader hands the agent, under the
+/// address, status and title the same read reports.
+#[derive(Debug, Default)]
+struct BrState {
+    target: String,
+    meta: String,
+    title: String,
+    body: String,
+    /// Addresses the user has read, oldest first, so ← walks back over them.
+    hist: Vec<String>,
+}
+
+/// The folder to name in a work-route request. Empty asks for the server's own
+/// root, which is what `.` means; repeating it would re-encode a folder the jail
+/// already resolves to.
+fn workspace_param(workspace: &str) -> String {
+    let trimmed = workspace.trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() || trimmed == "." { String::new() } else { workspace.to_string() }
+}
+
+/// A listing path made absolute against the root the jail reported, the same way
+/// the PWA's `joinPath` does, so both panes name a file the same.
+fn jail_path(root: &str, rel: &str) -> String {
+    if rel.is_empty() {
+        return String::new();
+    }
+    if root.is_empty() || root == "." {
+        return rel.to_string();
+    }
+    let absolute = rel.as_bytes().get(1) == Some(&b':')
+        || rel.starts_with('/')
+        || rel.starts_with("\\\\");
+    if absolute {
+        return rel.to_string();
+    }
+    let sep = if root.contains('\\') { '\\' } else { '/' };
+    let joined = format!(
+        "{}{sep}{}",
+        root.trim_end_matches(['\\', '/']),
+        rel.trim_start_matches(['\\', '/'])
+    );
+    // A copied path gets pasted into a shell or an Open dialog; one mixed
+    // separator in the middle of a Windows path reads as two different things.
+    if sep == '\\' { joined.replace('/', "\\") } else { joined }
+}
+
+fn decode_listing(value: serde_json::Value) -> Result<FmListing, String> {
+    if value["ok"] != serde_json::Value::Bool(true) {
+        return Err(value["error"].as_str().unwrap_or("directory listing failed").to_string());
+    }
+    let mut rows: Vec<FmRow> = value["entries"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| FmRow {
+            name: entry["name"].as_str().unwrap_or("").to_string(),
+            is_dir: entry["is_dir"].as_bool().unwrap_or(false),
+            size: entry["size"].as_u64().unwrap_or(0),
+        })
+        .collect();
+    // Folders first, then by name, ignoring case: the same order the PWA sorts to.
+    rows.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(FmListing { root: value["root"].as_str().unwrap_or("").to_string(), rows })
+}
+
+/// The answer behind a file preview, turned into what the pane paints: text for
+/// a `content` field, a decoded picture for `mime` and base64 `data`. The route
+/// used to answer a picture with lossy text, which filled this pane with
+/// replacement characters. Decoding happens here, on the caller's thread, so the
+/// UI never stops on a multi-megabyte bitmap.
+fn decode_file(value: serde_json::Value) -> Result<FileRead, String> {
+    if value["ok"] != serde_json::Value::Bool(true) {
+        return Err(value["error"].as_str().unwrap_or("file read failed").to_string());
+    }
+    if value["kind"].as_str() == Some("image") {
+        let mime = value["mime"].as_str().unwrap_or_default();
+        let format = ImageFormat::from_mime_type(mime)
+            .ok_or_else(|| format!("This pane has no decoder for {mime}."))?;
+        use base64::Engine as _;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(value["data"].as_str().unwrap_or_default())
+            .map_err(|_| "The image arrived incomplete.".to_string())?;
+        let bytes = value["bytes"].as_u64().unwrap_or(0);
+        return Ok(FileRead {
+            meta: format!("{mime} · {}", human_size(bytes)),
+            body: String::new(),
+            image: Some(Arc::new(Image::from_bytes(format, raw))),
+        });
+    }
+    let body = value["content"].as_str().unwrap_or("").to_string();
+    let bytes = value["bytes"].as_u64().unwrap_or_else(|| body.len() as u64);
+    let lines = value["lines"].as_u64();
+    let meta = match lines {
+        Some(n) => format!("{n} {} · {}", if n == 1 { "line" } else { "lines" }, human_size(bytes)),
+        None => human_size(bytes),
+    };
+    Ok(FileRead { meta, body, image: None })
+}
+
+fn decode_page(value: serde_json::Value) -> Result<BrPage, String> {
+    if value["ok"] != serde_json::Value::Bool(true) {
+        return Err(value["error"].as_str().unwrap_or("the page could not be read").to_string());
+    }
+    Ok(BrPage {
+        url: value["url"].as_str().unwrap_or("").to_string(),
+        status: value["status"].as_u64().unwrap_or(0) as u16,
+        title: value["title"].as_str().unwrap_or("").to_string(),
+        text: value["text"].as_str().unwrap_or("").to_string(),
+        truncated: value["truncated"].as_bool().unwrap_or(false),
+    })
 }
 
 #[derive(Debug)]
@@ -643,15 +920,23 @@ enum BackendResponse {
     Complete { task_id: u64, status: String, final_text: String },
     Failed(String),
     BackendInfo { names: Vec<String> },
+    GithubRepoCreated { workspace_id: String, result: Result<GithubRepository, String> },
     /// Which services answer, re-probed every couple of seconds and reported
     /// only when something changed. `branch` is the workspace's git branch, and
     /// `outlets` is the loop's last browser-agent report (`outlets_known` says
     /// whether there ever was one).
     ServeState { core_up: bool, core_root: String, axum: bool, engine: EngineState,
                  branch: String, outlets: Vec<Outlet>, outlets_known: bool,
-                 github: GithubAccountStatus },
+                 github: GithubAccountStatus, github_repositories: GithubRepositoryStatus,
+                 obsidian: ObsidianStatus, capabilities: Option<BackendCapabilities> },
     Core(CoreEvent),
     Stt(Result<String, String>),
+    ObsidianWrite(Result<String, String>),
+    /// Inspector reads. Each carries the number its own request took so a late
+    /// answer cannot paint a folder or a page the user has navigated away from.
+    WorkFiles { seq: usize, result: Result<FmListing, String> },
+    WorkFile { seq: usize, name: String, fallback: String, result: Result<FileRead, String> },
+    Browse { seq: usize, fallback: String, result: Result<BrPage, String> },
 }
 
 /// What the inference engine reports about itself. `vision` is `None` when the
@@ -730,6 +1015,8 @@ impl App {
         settings_path: PathBuf,
         composer: Entity<InputState>,
         search: Entity<InputState>,
+        br_input: Entity<InputState>,
+        repo_create_input: Entity<InputState>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -738,9 +1025,10 @@ impl App {
         let _task = cx.spawn(async move |weak, cx: &mut AsyncApp| {
             let mut last_tick = std::time::Instant::now();
             loop {
-                cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
                 if weak.update(cx, |a, cx| {
                     a.poll_responses(cx);
+                    a.flush_save();
                     a.toasts.retain(|t| t.at.elapsed() < std::time::Duration::from_secs(6));
                     if a.working() && last_tick.elapsed() >= std::time::Duration::from_secs(1) {
                         last_tick = std::time::Instant::now();
@@ -757,6 +1045,20 @@ impl App {
             match event {
                 InputEvent::Change => cx.notify(),
                 InputEvent::PressEnter { .. } => this.send(window, cx),
+                _ => {}
+            }
+        }).detach();
+
+        // The Browser tab's address field. Enter reads it, the same way the PWA's
+        // form submits it.
+        cx.observe(&br_input, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(&br_input, window, |this, _, event: &InputEvent, _, cx| {
+            match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => {
+                    let target = this.br_input.read(cx).value().to_string();
+                    this.browse_go(target);
+                }
                 _ => {}
             }
         }).detach();
@@ -787,22 +1089,30 @@ impl App {
         let font_size = settings.font_size.unwrap_or(14.0);
         let auto_save = settings.auto_save.unwrap_or(true);
         let notifications = settings.notifications.unwrap_or(true);
-        let debug_mode = settings.debug_mode.unwrap_or(false);
-        let experimental_features = settings.experimental_features.unwrap_or(false);
         let allow_write = settings.allow_write.unwrap_or(false);
         let allow_shell = settings.allow_shell.unwrap_or(false);
         let allow_web = settings.allow_web.unwrap_or(false);
         let ask_each = settings.ask_each.unwrap_or(false);
+        let rail_width = Pane::Rail.clamp(
+            settings.rail_width.unwrap_or_else(|| Pane::Rail.default_width()));
+        let inspector_width = Pane::Inspector.clamp(
+            settings.inspector_width.unwrap_or_else(|| Pane::Inspector.default_width()));
+        let insp_tab = settings.insp_tab.as_deref()
+            .and_then(InspTab::parse)
+            .unwrap_or(InspTab::Overview);
         // Both backends listen on the same port, so the core lane shares this URL.
         let core_base = server_url.clone();
 
         let mut app = Self {
             tasks: vec![], active: None, queued: vec![], inspector: true,
+            rail_width, inspector_width, pane_drag: None,
             open_file: None,
+            insp_tab, fm: FmState::default(), br: BrState::default(), br_input,
+            fm_seq: 0, file_seq: 0, br_seq: 0,
             attention_only: false, block_open: Default::default(), search_open: false, search, composer,
             server_url, engine_url, api_key, model, access_mode, reasoning_effort,
             theme, font_size, auto_save,
-            notifications, debug_mode, experimental_features,
+            notifications,
             perm_dropdown_open: false, model_dropdown_open: false,
             stt_recording: false,
             stt_stop: Arc::new(AtomicBool::new(false)),
@@ -814,16 +1124,20 @@ impl App {
             settings_path: settings_path.clone(), backend_ok: false,
             core: Core { base: core_base }, core_up: false, rust_up: false, core_root: String::new(),
             outlets: Vec::new(), outlets_known: false, github: GithubAccountStatus::default(),
-            resume: Vec::new(),
+            github_repositories: GithubRepositoryStatus::default(), obsidian: ObsidianStatus::default(),
+            capabilities: None, resume: Vec::new(),
             agents: vec![],
             path, next_id: 1, response_rx: rx, response_tx: tx,
             pending_think: None, pending_content: None, tools: std::collections::HashMap::new(),
             _task, scroll_handle: ScrollHandle::new(), line: String::new(), toasts: Vec::new(), pending_send: None,
             workspaces: vec![], active_workspace_id: None,
+            hovered_workspace_id: None, hovered_task_id: None, hovered_ws_header: false,
             workspaces_path: settings_path.parent().unwrap_or(&settings_path).join("workspaces.json"),
-            engine: EngineState::default(), branch: String::new(),
+            engine: EngineState::default(), branch: String::new(), repo_create_input,
             pending_atts: Vec::new(),
             suite_root: suite::discover().root,
+            save_pending: Cell::new(false),
+            last_save: Cell::new(std::time::Instant::now()),
         };
         app.load_workspaces();
         app.fetch_backend_info();
@@ -844,7 +1158,10 @@ impl App {
             let core = Core { base: base.clone() };
             let agent = CodingAgentClient::with_base(base);
             let engine = Engine { base: engine_base, key: engine_key };
-            let mut last: Option<(bool, String, bool, EngineState, String, bool, Vec<Outlet>, GithubAccountStatus)> = None;
+            let mut last: Option<(
+                bool, String, bool, EngineState, String, bool, Vec<Outlet>, GithubAccountStatus,
+                GithubRepositoryStatus, ObsidianStatus, Option<BackendCapabilities>,
+            )> = None;
             loop {
                 let health = core.health();
                 let (core_up, core_root, axum) = match &health {
@@ -882,22 +1199,27 @@ impl App {
                         }
                     }
                 }
-                // Only the agent loop probes the browser lanes — the Rust backend
-                // has no such route — so an empty rail here means the loop did not
-                // answer, which the rail says as plainly as it says "not
-                // installed". Core caches the probes; this is one loopback GET.
-                let probed = if core_up { core.outlets() } else { None };
+                // `/api/outlets` is served by whichever loop answers `/api/health` —
+                // the Rust backend or the legacy core route — so the rail probes on
+                // either. An empty rail here means the loop did not answer, which is
+                // a different claim from "not installed" and says so.
+                // Core caches the probes; this is one loopback GET.
+                let probed = if core_up || axum { core.outlets() } else { None };
                 let outlets_known = probed.is_some();
                 let outlets: Vec<Outlet> = probed.as_ref()
                     .map(|o| o.list().into_iter().cloned().collect())
                     .unwrap_or_default();
                 let github = agent.github_account();
+                let github_repositories = agent.github_repositories();
+                let obsidian = agent.obsidian_status();
+                let capabilities = agent.capabilities();
                 let state = (core_up, core_root.clone(), axum, engine_state.clone(), branch.clone(),
-                             outlets_known, outlets.clone(), github.clone());
+                             outlets_known, outlets.clone(), github.clone(), github_repositories.clone(),
+                             obsidian.clone(), capabilities.clone());
                 if last.as_ref() != Some(&state) {
                     let _ = tx.send(BackendResponse::ServeState {
                         core_up, core_root, axum, engine: engine_state, branch,
-                        outlets, outlets_known, github,
+                        outlets, outlets_known, github, github_repositories, obsidian, capabilities,
                     });
                     last = Some(state);
                 }
@@ -1009,6 +1331,16 @@ impl App {
                         self.active = self.tasks.last().map(|t| t.id);
                     }
                 }
+            } else {
+                // A parse failure must not present as "no history yet": the next
+                // save would overwrite the file with an empty task list. Back the
+                // raw bytes up and say so instead.
+                let backup = self.path.with_extension("json.corrupt");
+                let _ = std::fs::write(&backup, &s);
+                self.toast(
+                    "Saved history could not be read; the file was backed up before starting fresh.",
+                    false,
+                );
             }
         }
         if let Some(t) = self.task_mut() {
@@ -1031,13 +1363,37 @@ impl App {
     }
 
     fn save(&self) {
+        // `auto_save` off means the transcript stays in memory: the PWA does the
+        // same at app.js:302, and a history file written anyway would make the
+        // switch a label rather than a setting.
+        if !self.auto_save {
+            return;
+        }
+        self.save_pending.set(true);
+        if self.last_save.get().elapsed() >= SAVE_INTERVAL {
+            self.flush_save();
+        }
+    }
+
+    fn flush_save(&self) {
+        if !self.save_pending.get() {
+            return;
+        }
         // Empty drafts are not history: first run stays empty, real
-        // conversations persist across restarts.
+        // conversations persist across restarts. Writes are coalesced so a
+        // streamed answer does not serialize and rewrite the whole transcript
+        // for every delta.
         let tasks: Vec<Task> = self.tasks.iter().filter(|t| !t.msgs.is_empty()).cloned().collect();
         let active = self.active.filter(|id| tasks.iter().any(|t| t.id == *id));
         let h = History { tasks, active, queued: self.queued.clone() };
         if let Ok(s) = serde_json::to_string_pretty(&h) {
-            let _ = std::fs::write(&self.path, s);
+            // Replace through a temp file + rename: a crash mid-write would
+            // otherwise leave truncated JSON that the next start reads as empty.
+            let tmp = self.path.with_extension("json.tmp");
+            if std::fs::write(&tmp, s).is_ok() && std::fs::rename(&tmp, &self.path).is_ok() {
+                self.save_pending.set(false);
+                self.last_save.set(std::time::Instant::now());
+            }
         }
     }
 
@@ -1053,15 +1409,17 @@ impl App {
             font_size: Some(self.font_size),
             auto_save: Some(self.auto_save),
             notifications: Some(self.notifications),
-            debug_mode: Some(self.debug_mode),
-            experimental_features: Some(self.experimental_features),
             allow_write: Some(self.allow_write),
             allow_shell: Some(self.allow_shell),
             allow_web: Some(self.allow_web),
             ask_each: Some(self.ask_each),
+            rail_width: Some(self.rail_width),
+            inspector_width: Some(self.inspector_width),
+            insp_tab: Some(self.insp_tab.as_str().to_string()),
         };
         if let Ok(s) = serde_json::to_string_pretty(&s) {
-            let _ = std::fs::write(&self.settings_path, s);
+            let tmp = self.settings_path.with_extension("json.tmp");
+            let _ = std::fs::write(&tmp, s).and_then(|_| std::fs::rename(&tmp, &self.settings_path));
         }
     }
 
@@ -1070,6 +1428,16 @@ impl App {
             if let Ok(store) = serde_json::from_str::<WorkspaceStore>(&s) {
                 self.workspaces = store.workspaces;
                 self.active_workspace_id = store.active_id;
+            } else {
+                // save_workspaces() below replaces an unreadable store with the
+                // default workspace, so back the raw bytes up first or the
+                // user's workspace bindings are lost.
+                let backup = self.workspaces_path.with_extension("json.corrupt");
+                let _ = std::fs::write(&backup, &s);
+                self.toast(
+                    "Saved workspaces could not be read; the file was backed up before starting fresh.",
+                    false,
+                );
             }
         }
         if self.workspaces.is_empty() {
@@ -1081,6 +1449,7 @@ impl App {
             self.save_workspaces();
         }
         self.repoint_active_workspace();
+        self.sync_workspace_github_repos();
     }
 
     fn save_workspaces(&self) {
@@ -1089,7 +1458,8 @@ impl App {
             active_id: self.active_workspace_id.clone(),
         };
         if let Ok(s) = serde_json::to_string_pretty(&store) {
-            let _ = std::fs::write(&self.workspaces_path, s);
+            let tmp = self.workspaces_path.with_extension("json.tmp");
+            let _ = std::fs::write(&tmp, s).and_then(|_| std::fs::rename(&tmp, &self.workspaces_path));
         }
     }
 
@@ -1098,12 +1468,39 @@ impl App {
             .and_then(|id| self.workspaces.iter().find(|w| &w.id == id))
     }
 
+    fn sync_workspace_github_repos(&mut self) {
+        let suite_root = self.suite_root.clone();
+        let mut changed = false;
+        for workspace in &mut self.workspaces {
+            if workspace.github_repo.is_some() {
+                continue;
+            }
+            let dir = workspace.source_folders.first()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| suite_root.clone());
+            if let Some(repository) = git::repo_context(&dir.to_string_lossy()).github_repo {
+                workspace.github_repo = Some(repository);
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_workspaces();
+        }
+    }
+
+    fn active_github_repo(&self) -> Option<String> {
+        self.active_workspace().and_then(|workspace| workspace.github_repo.clone())
+    }
+
     fn add_workspace(&mut self, name: String, source_folders: Vec<String>, icon: String, color: String, indexed: bool) {
         let mut ws = Workspace::new(name);
         ws.source_folders = source_folders;
         ws.icon = icon;
         ws.color = color;
         ws.indexed = indexed;
+        let dir = ws.source_folders.first().map(PathBuf::from)
+            .unwrap_or_else(|| self.suite_root.clone());
+        ws.github_repo = git::repo_context(&dir.to_string_lossy()).github_repo;
         let id = ws.id.clone();
         self.workspaces.push(ws);
         self.active_workspace_id = Some(id);
@@ -1151,7 +1548,9 @@ impl App {
     }
 
     fn poll_responses(&mut self, cx: &mut Context<Self>) {
+        let mut changed = false;
         while let Ok(resp) = self.response_rx.try_recv() {
+            changed = true;
             match resp {
                 BackendResponse::Stt(result) => {
                     self.stt_recording = false;
@@ -1174,14 +1573,89 @@ impl App {
                 BackendResponse::BackendInfo { names } => {
                     self.agents = names;
                 }
+                BackendResponse::GithubRepoCreated { workspace_id, result } => {
+                    match result {
+                        Ok(repository) => {
+                            if let Some(workspace) = self.workspaces.iter_mut().find(|w| w.id == workspace_id) {
+                                workspace.github_repo = Some(repository.full_name.clone());
+                                self.save_workspaces();
+                                self.toast(format!("GitHub repository connected: {}", repository.full_name), true);
+                            }
+                        }
+                        Err(error) => self.toast(format!("GitHub repository creation failed: {error}"), false),
+                    }
+                }
+                BackendResponse::ObsidianWrite(result) => {
+                    match result {
+                        Ok(path) => self.toast(format!("Obsidian note written: {path}"), true),
+                        Err(error) => self.toast(format!("Obsidian write failed: {error}"), false),
+                    }
+                }
+                BackendResponse::WorkFiles { seq, result } => {
+                    if seq != self.fm_seq { continue; }
+                    match result {
+                        Ok(listing) => {
+                            self.fm.root = listing.root;
+                            self.fm.rows = listing.rows;
+                            self.fm.note = if self.fm.rows.is_empty() {
+                                "This folder is empty.".to_string()
+                            } else {
+                                String::new()
+                            };
+                        }
+                        Err(error) => self.fm.note = format!("Could not list this folder: {error}"),
+                    }
+                }
+                BackendResponse::WorkFile { seq, name, fallback, result } => {
+                    if seq != self.file_seq { continue; }
+                    self.open_file = Some(match result {
+                        Ok(read) => FileView {
+                            path: fallback, name, body: read.body, meta: read.meta,
+                            failed: false, image: read.image,
+                        },
+                        Err(error) => FileView {
+                            path: fallback, name, body: String::new(), meta: error,
+                            failed: true, image: None,
+                        },
+                    });
+                }
+                BackendResponse::Browse { seq, fallback, result } => {
+                    if seq != self.br_seq { continue; }
+                    match result {
+                        Ok(page) => {
+                            // The reader follows redirects, so the address it
+                            // reports is the one actually shown — the pane's field
+                            // has to say that, not what was typed.
+                            self.br.target = page.url.clone();
+                            self.br.title = page.title;
+                            self.br.body = page.text;
+                            self.br.meta = format!(
+                                "{} · {}{}", page.status, page.url,
+                                if page.truncated { " · truncated" } else { "" });
+                            if let Some(last) = self.br.hist.last_mut() {
+                                if *last == fallback { *last = self.br.target.clone(); }
+                            }
+                        }
+                        Err(error) => {
+                            self.br.title.clear();
+                            self.br.body.clear();
+                            self.br.meta = error;
+                        }
+                    }
+                }
                 BackendResponse::ServeState { core_up, core_root, axum, engine, branch,
-                                             outlets, outlets_known, github } => {
+                                             outlets, outlets_known, github, github_repositories,
+                                             obsidian, capabilities } => {
                     self.core_up = core_up;
                     self.rust_up = axum;
                     self.core_root = core_root;
+                    self.sync_workspace_github_repos();
                     self.outlets = outlets;
                     self.outlets_known = outlets_known;
                     self.github = github;
+                    self.github_repositories = github_repositories;
+                    self.obsidian = obsidian;
+                    self.capabilities = capabilities;
                     self.engine = engine;
                     self.branch = branch;
                     // Either service answering means the composer can send;
@@ -1333,6 +1807,8 @@ impl App {
                 }
             }
             self.save();
+        }
+        if changed {
             cx.notify();
         }
     }
@@ -1352,8 +1828,20 @@ impl App {
     }
 
     fn set_task_status(&mut self, task_id: u64, status: &str) {
+        let mut notice: Option<String> = None;
         if let Some(t) = self.tasks.iter_mut().find(|t| t.id == task_id) {
-            t.status = status.into();
+            // One toast per run: the status is written from several paths (the SSE
+            // event, the poll response, the queue drain), and a repeat of the same
+            // word is not a completion.
+            if t.status != status {
+                t.status = status.into();
+                if self.notifications && status == "Complete" {
+                    notice = Some(format!("{} is complete", t.title));
+                }
+            }
+        }
+        if let Some(text) = notice {
+            self.toast(text, true);
         }
     }
 
@@ -1421,6 +1909,7 @@ impl App {
         window.open_dialog(cx, move |dialog, _, _| {
             let (text, note) = (text.clone(), note.clone());
             dialog.title(format!("Review diff · {path}"))
+                .entrance(gpui_kit::component::dialog::DialogEntrance::None)
                 .content(move |content, _, cx| {
                     let (text, note) = (text.clone(), note.clone());
                     let t = cx.theme().clone();
@@ -1452,16 +1941,6 @@ impl App {
                     .child(Button::new("review-close").label("Close").ghost()
                         .on_click(|_, window, cx| { window.close_dialog(cx); })))
         });
-    }
-
-    fn new_task(&mut self) {
-        let id = self.next_id;
-        self.next_id += 1;
-        let repo = self.repo_label();
-        self.tasks.push(Task { id, title: "New task".into(), status: "Idle".into(), repo, msgs: vec![], backend_id: None, started_at: None, approvals: vec![], core_sid: None, workspace_id: self.active_workspace_id.clone(), plan: vec![], progress: Default::default() });
-        self.active = Some(id);
-        self.attention_only = false;
-        self.save();
     }
 
     fn new_task_in_workspace(&mut self, workspace_id: &str) {
@@ -1615,7 +2094,22 @@ impl App {
     }
 
     fn model_display_name(&self) -> String {
-        fennec_ui::controls::model_display_name(&self.model)
+        fennec_ui::controls::model_display_name(self.active_model())
+    }
+
+    /// The checkpoint the engine proved it holds. Fennec serves one model and
+    /// answers every request as it, so an id the health probe did not report
+    /// would name a model nothing is running.
+    fn served_model(&self) -> Option<&str> {
+        if self.engine.up && !self.engine.model.is_empty() {
+            Some(self.engine.model.as_str())
+        } else {
+            None
+        }
+    }
+
+    fn active_model(&self) -> &str {
+        self.served_model().unwrap_or(&self.model)
     }
 
     fn toggle_stt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1642,17 +2136,24 @@ impl App {
         self.stt_buffer.lock().unwrap().clear();
         self.stt_stop.store(false, Ordering::Relaxed);
         let channels = config.channels() as usize;
+        let max_samples = rate as usize * MAX_STT_SECONDS;
         let buffer = self.stt_buffer.clone();
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => device.build_input_stream(&config.into(), move |data: &[f32], _| {
                 let mut b = buffer.lock().unwrap();
-                for frame in data.chunks(channels) { b.push(frame[0]); }
+                for frame in data.chunks(channels) {
+                    if b.len() >= max_samples { break; }
+                    b.push(frame[0]);
+                }
             }, |e| eprintln!("stt error: {e}"), None),
             cpal::SampleFormat::I16 => {
                 let buffer = self.stt_buffer.clone();
                 device.build_input_stream(&config.into(), move |data: &[i16], _| {
                     let mut b = buffer.lock().unwrap();
-                    for frame in data.chunks(channels) { b.push(frame[0] as f32 / 32768.0); }
+                    for frame in data.chunks(channels) {
+                        if b.len() >= max_samples { break; }
+                        b.push(frame[0] as f32 / 32768.0);
+                    }
                 }, |e| eprintln!("stt error: {e}"), None)
             },
             _ => { window.push_notification(Notification::info("Unsupported mic format."), cx); return; }
@@ -1773,7 +2274,9 @@ impl App {
         window.open_dialog(cx, move |dialog, _, _| {
             let input = input.clone();
             let weak = weak.clone();
-            dialog.title("Edit queued task").content({
+            dialog.title("Edit queued task")
+                .entrance(gpui_kit::component::dialog::DialogEntrance::None)
+                .content({
                 let input = input.clone();
                 let weak = weak.clone();
                 move |content, _, _| {
@@ -1800,6 +2303,57 @@ impl App {
                 }
             }).on_close(|_, window, cx| window.close_dialog(cx))
         });
+    }
+
+    fn create_github_repository(&self, workspace_id: String, name: String) {
+        let base = self.server_url.clone();
+        let tx = self.response_tx.clone();
+        std::thread::spawn(move || {
+            let result = CodingAgentClient::with_base(base).create_github_repository(&name, true);
+            let _ = tx.send(BackendResponse::GithubRepoCreated { workspace_id, result });
+        });
+    }
+
+    fn open_repository_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.active_workspace_id.clone() else { return };
+        let repositories: Vec<fennec_ui::repository::RepositoryEntry> = self
+            .github_repositories
+            .repositories
+            .iter()
+            .map(|repository| fennec_ui::repository::RepositoryEntry {
+                full_name: repository.full_name.clone(),
+                private: repository.private,
+            })
+            .collect();
+        let current = self.active_github_repo();
+        let select_app = cx.entity().downgrade();
+        let create_app = select_app.clone();
+        let select_ws = workspace_id.clone();
+        fennec_ui::repository::open_repository_dialog(
+            window,
+            cx,
+            repositories,
+            current,
+            move |full_name, cx| {
+                if let Some(app) = select_app.upgrade() {
+                    let _ = app.update(cx, |app, cx| {
+                        if let Some(workspace) = app.workspaces.iter_mut().find(|w| w.id == select_ws) {
+                            workspace.github_repo = Some(full_name);
+                            app.save_workspaces();
+                            cx.notify();
+                        }
+                    });
+                }
+            },
+            move |name, cx| {
+                if let Some(app) = create_app.upgrade() {
+                    let _ = app.update(cx, |app, _| {
+                        app.create_github_repository(workspace_id.clone(), name);
+                        app.toast("Creating GitHub repository…", true);
+                    });
+                }
+            },
+        );
     }
 
     fn queue_action(&mut self, action: QueueAction, window: &mut Window, cx: &mut Context<Self>) {
@@ -1922,6 +2476,7 @@ impl App {
             let weak = weak.clone();
             dialog
                 .title("Rename Task")
+                .entrance(gpui_kit::component::dialog::DialogEntrance::None)
                 .content({
                     let name_input = name_input.clone();
                     let weak = weak.clone();
@@ -3039,49 +3594,118 @@ impl Render for App {
             self.composer.update(cx, |state, cx| state.set_value(text, _w, cx));
         }
         let t = cx.theme().clone();
+        // While a divider is dragged its move/up tracking lives on the root:
+        // gpui dispatches mouse events to ancestors under the pointer, so the
+        // pane keeps following the cursor after it leaves the 6px grab strip,
+        // and an accidental release outside a pane still ends the drag.
+        let dragging = self.pane_drag.is_some();
         div().flex().flex_col().size_full().bg(t.background).text_color(t.foreground)
+            .when(dragging, |root| root
+                .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _w, cx| {
+                    let Some((pane, start_x, start_w)) = this.pane_drag else { return };
+                    if !e.dragging() {
+                        this.pane_drag = None;
+                        this.save_settings();
+                        cx.notify();
+                        return;
+                    }
+                    let dx = f32::from(e.position.x) - start_x;
+                    let w = match pane {
+                        Pane::Rail => start_w + dx,
+                        Pane::Inspector => start_w - dx,
+                    };
+                    this.set_pane_width(pane, w);
+                    cx.notify();
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                    if this.pane_drag.take().is_some() {
+                        this.save_settings();
+                        cx.notify();
+                    }
+                })))
             .child(self.topbar(cx))
             .child(div().flex().flex_1().overflow_hidden()
                 .child(self.left(cx))
+                .child(self.resizer(Pane::Rail, cx))
                 .child(self.center(cx))
-                .children(self.inspector.then(|| self.right(cx))))
+                .when(self.inspector, |row| row
+                    .child(self.resizer(Pane::Inspector, cx))
+                    .child(self.right(cx))))
             .child(self.dropdowns(cx))
     }
 }
 
 impl App {
+    fn set_pane_width(&mut self, pane: Pane, w: f32) {
+        match pane {
+            Pane::Rail => self.rail_width = pane.clamp(w),
+            Pane::Inspector => self.inspector_width = pane.clamp(w),
+        }
+    }
+
+    /// The 6px grab strip straddling a side pane's inner edge — the native twin
+    /// of the PWA's `.pane-resizer`: see-through until hovered, a lit rule while
+    /// dragged, col-resize cursor, and a double-click hands the default width
+    /// back. The negative margins overlap the border so the panes stay flush.
+    fn resizer(&self, pane: Pane, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        let dragging = self.pane_drag.map(|(p, ..)| p == pane).unwrap_or(false);
+        let start = match pane {
+            Pane::Rail => self.rail_width,
+            Pane::Inspector => self.inspector_width,
+        };
+        div().flex_shrink_0().w(px(6.0)).mx(px(-3.0)).cursor_col_resize()
+            .when(!dragging, |d| d.hover(|s| s.bg(t.accent.opacity(0.18))))
+            .child(div().w(px(2.0)).h_full().when(dragging, |d| d.bg(t.accent)))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, _w, cx| {
+                if e.click_count == 2 {
+                    this.pane_drag = None;
+                    this.set_pane_width(pane, pane.default_width());
+                    this.save_settings();
+                } else {
+                    this.pane_drag = Some((pane, f32::from(e.position.x), start));
+                }
+                cx.notify();
+            }))
+    }
+
     fn topbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let status_text = if self.backend_ok { "Backend connected" } else { "Backend offline" };
         let status_color = if self.backend_ok { t.green } else { t.red };
-        div().h(px(48.0)).flex_shrink_0().px_4().flex().items_center().justify_between()
+        
+        div().h(px(56.0)).flex_shrink_0().px_4().flex().items_center().justify_between()
             .bg(fennec_ui::theme::panel()).border_b_1().border_color(t.border)
             .child(div().flex().items_center().gap_3()
-                .child(div().w(px(32.0)).h(px(32.0)).rounded_lg().bg(t.accent.opacity(0.12))
-                    .flex().items_center().justify_center().child(brand_fox(&t)))
-                .child(Label::new("Fennec").font_weight(FontWeight::SEMIBOLD)))
+                .child(brand_fox(&t, 48.0))
+                .child(div().flex().flex_col().gap_0()
+                    .child(Label::new("Fennec").font_weight(FontWeight::SEMIBOLD).text_size(px(14.0)))
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().w(px(6.0)).h(px(6.0)).rounded_full().flex_shrink_0().bg(status_color))
+                        .child(Label::new(status_text).text_size(px(11.0)).text_color(t.muted_foreground)))))
             .child(div().flex().items_center().gap_2()
-                .child(div().w(px(8.0)).h(px(8.0)).rounded_full().flex_shrink_0().bg(status_color))
-                .child(Label::new(status_text).text_size(px(12.0)).text_color(t.muted_foreground))
-                .child(Button::new("settings").label("⚙").ghost().xsmall().w(px(36.0)).h(px(36.0)).rounded_md()
+                .child(Button::new("settings").ghost().xsmall().w(px(36.0)).h(px(36.0)).rounded_md()
                     .border_1().border_color(t.border).justify_center()
-                    .child(Label::new("⚙").text_size(px(18.0)))
+                    .child(ui_icon("settings", 18.0, t.muted_foreground))
                     .on_click(cx.listener(|a, _, window, cx| { a.open_settings(window, cx); })))
                 .child(Button::new("inspector-toggle").ghost().xsmall().w(px(36.0)).h(px(36.0)).rounded_md()
                     .border_1().border_color(t.border).justify_center()
                     .when(self.inspector, |b| b.bg(t.accent.opacity(0.15)).border_color(t.accent))
-                    .child(Label::new(if self.inspector { "»" } else { "«" }).text_size(px(18.0))
-                        .text_color(if self.inspector { t.accent } else { t.foreground }))
-                    .on_click(cx.listener(|a, _, _, cx| { a.inspector = !a.inspector; cx.notify(); }))))
-    }
-
-    /// The stored workspace icon is a name; the rail paints the glyph the PWA
-    /// paints for it, and anything already a glyph passes through.
-    fn ws_glyph(icon: &str) -> &str {
-        match icon {
-            "" | "folder" => "📁",
-            other => other,
-        }
+                    .child(ui_icon("panel", 18.0, if self.inspector { t.accent } else { t.foreground }))
+                    .on_click(cx.listener(|a, _, _, cx| { a.inspector = !a.inspector; cx.notify(); })))
+                .child(div().w(px(1.0)).h(px(20.0)).bg(t.border).mx_1())
+                .child(Button::new("minimize").ghost().xsmall().w(px(32.0)).h(px(32.0)).rounded_md()
+                    .justify_center()
+                    .child(Label::new("—").text_size(px(14.0)).text_color(t.muted_foreground))
+                    .on_click(cx.listener(|_, _, window, _| { window.minimize_window(); })))
+                .child(Button::new("maximize").ghost().xsmall().w(px(32.0)).h(px(32.0)).rounded_md()
+                    .justify_center()
+                    .child(Label::new("□").text_size(px(14.0)).text_color(t.muted_foreground))
+                    .on_click(cx.listener(|_, _, window, _| { window.toggle_fullscreen(); })))
+                .child(Button::new("close").ghost().xsmall().w(px(32.0)).h(px(32.0)).rounded_md()
+                    .justify_center()
+                    .child(Label::new("×").text_size(px(16.0)).text_color(t.red))
+                    .on_click(cx.listener(|_, _, window, cx| { window.remove_window(); cx.quit(); }))))
     }
 
     fn left(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3093,57 +3717,53 @@ impl App {
         let q_lower = query.to_lowercase();
         let attention = self.attention_count();
         let tasks = self.filtered_tasks(&query);
-        let ws_name = self.active_workspace()
-            .map(|w| w.name.clone())
-            .unwrap_or_else(|| "No workspace".into());
         let branch = if self.branch.is_empty() { "main".to_string() } else { self.branch.clone() };
-        // `.nav-item.active` is the plain run view: neither the answered
-        // approvals nor the filter box is open over it.
-        let coding_active = !self.attention_only && !self.search_open;
-
-        div().w(px(260.0)).flex_shrink_0().bg(panel).border_r_1().border_color(t.border)
+        let working_in = {
+            let ws_name = self.active_workspace()
+                .map(|workspace| workspace.name.clone())
+                .unwrap_or_else(|| "Workspace".into());
+            let on_change = {
+                let weak = cx.entity().downgrade();
+                move |window: &mut Window, cx: &mut gpui_kit::App| {
+                    if let Some(app) = weak.upgrade() {
+                        let _ = app.update(cx, |app, cx| app.open_repository_dialog(window, cx));
+                    }
+                }
+            };
+            let on_create = {
+                let weak = cx.entity().downgrade();
+                move |name: String, _window: &mut Window, cx: &mut gpui_kit::App| {
+                    if let Some(app) = weak.upgrade() {
+                        let _ = app.update(cx, |app, _cx| {
+                            let ws_id = app.active_workspace_id.clone().unwrap_or_default();
+                            app.create_github_repository(ws_id, name);
+                        });
+                    }
+                }
+            };
+            fennec_ui::repository::working_in_banner(
+                &t,
+                &ws_name,
+                self.active_github_repo().as_deref(),
+                &branch,
+                &self.repo_create_input,
+                on_change,
+                on_create,
+            )
+        };
+        div().w(px(self.rail_width)).flex_shrink_0().bg(panel).border_r_1().border_color(t.border)
             .flex().flex_col().p_3().gap_4()
-            // `.workspace-section`: the folder the runs work in, its branch and mode.
-            .child(div().flex().flex_col().p_3().mb_1().rounded_md().border_1().border_color(t.border)
-                .child(Label::new("ACTIVE WORKSPACE").text_size(px(10.0))
-                    .font_weight(FontWeight::SEMIBOLD).text_color(t.muted_foreground))
-                .child(Label::new(ws_name).text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).mt_1())
-                .child(div().flex().items_center().gap_2().mt_1()
-                    .child(Label::new(branch).font_family("monospace").text_size(px(11.0))
-                        .text_color(t.muted_foreground))
-                    .child(Label::new("·").text_size(px(11.0)).text_color(t.muted_foreground))
-                    .child(Label::new("1.0.0").font_family("monospace").text_size(px(10.0))
-                        .text_color(t.muted_foreground))
-                    .child(Label::new("working tree").text_size(px(11.0)).text_color(t.muted_foreground))))
-            // `.nav-section`: four borderless rows, the selected one on --surface.
+            .child(working_in)
+            // `.nav-section`: attention and search remain the primary rail actions.
             .child(div().flex().flex_col().gap_1()
-                .child(Button::new("nav-coding").ghost().w_full().min_h(px(36.0)).rounded_md().px_3().py_2()
-                    .justify_start()
-                    .when(coding_active, |b| b.bg(surface))
-                    .child(div().flex().items_center().gap_3()
-                        .child(Label::new("≡").text_size(px(14.0)).w(px(18.0))
-                            .text_color(if coding_active { t.accent } else { t.muted_foreground }))
-                        .child(Label::new("Recent tasks").text_size(px(13.0)).font_weight(FontWeight::MEDIUM)))
-                    .on_click(cx.listener(|a, _, _, cx| {
-                        a.attention_only = false;
-                        a.search_open = false;
-                        cx.notify();
-                    })))
-                .child(Button::new("nav-new-task").ghost().w_full().min_h(px(36.0)).rounded_md().px_3().py_2()
-                    .justify_start()
-                    .child(div().flex().items_center().gap_3()
-                        .child(Label::new("⊕").text_size(px(14.0)).w(px(18.0))
-                            .text_color(t.muted_foreground))
-                        .child(Label::new("New Task").text_size(px(13.0)).font_weight(FontWeight::MEDIUM)))
-                    .on_click(cx.listener(|a, _, _, cx| { a.new_task(); cx.notify(); })))
                 .child(Button::new("nav-attention").ghost().w_full().min_h(px(36.0)).rounded_md().px_3().py_2()
                     .justify_start()
                     .when(self.attention_only, |b| b.bg(surface))
-                    .child(div().flex().items_center().gap_3()
-                        .child(Label::new("◷").text_size(px(14.0)).w(px(18.0))
-                            .text_color(if self.attention_only { t.accent } else { t.muted_foreground }))
-                        .child(Label::new("My Attention").text_size(px(13.0)).font_weight(FontWeight::MEDIUM))
-                        .children(attention_badge(&t, attention)))
+                    .child(div().w_full().flex().items_center().gap_3()
+                        .child(div().w(px(18.0)).flex_shrink_0().flex().justify_center()
+                            .child(ui_icon("clock", 16.0, if self.attention_only { t.accent } else { t.muted_foreground })))
+                        .child(Label::new("My attention").text_size(px(13.0)).font_weight(FontWeight::MEDIUM))
+                        .children(attention_badge(&t, attention).map(|badge| badge.ml_auto())))
                     .on_click(cx.listener(|a, _, _, cx| {
                         a.attention_only = !a.attention_only;
                         a.search_open = false;
@@ -3152,36 +3772,49 @@ impl App {
                 .child(Button::new("nav-search").ghost().w_full().min_h(px(36.0)).rounded_md().px_3().py_2()
                     .justify_start()
                     .when(self.search_open, |b| b.bg(surface))
-                    .child(div().flex().items_center().gap_3()
-                        .child(Label::new("⌕").text_size(px(14.0)).w(px(18.0))
-                            .text_color(if self.search_open { t.accent } else { t.muted_foreground }))
+                    .child(div().w_full().flex().items_center().gap_3()
+                        .child(div().w(px(18.0)).flex_shrink_0().flex().justify_center()
+                            .child(ui_icon("search", 16.0, if self.search_open { t.accent } else { t.muted_foreground })))
                         .child(Label::new("Search").text_size(px(13.0)).font_weight(FontWeight::MEDIUM)))
                     .on_click(cx.listener(|a, _, _, cx| {
                         a.search_open = !a.search_open;
                         a.attention_only = false;
                         cx.notify();
                     }))))
-            // `.section-header`: the WORKSPACES label and the add-workspace button.
-            .child(div().flex().items_center().justify_between()
-                .child(Label::new("WORKSPACES").text_size(px(10.0)).font_weight(FontWeight::SEMIBOLD)
+            // `.section-header`: the Workspaces label and the add-workspace button.
+            .child(div().id("ws-section-header").flex().items_center().justify_between()
+                .child(Label::new("Workspaces").text_size(px(10.0)).font_weight(FontWeight::SEMIBOLD)
                     .text_color(t.muted_foreground))
-                .child(Button::new("new-workspace-header").label("+").ghost().xsmall()
-                    .w(px(24.0)).h(px(24.0)).rounded_md().justify_center()
-                    .border_1().border_color(t.border)
-                    .on_click(cx.listener(|_a, _, window, cx| {
-                        let weak = cx.entity().downgrade();
-                        open_workspace_dialog(window, cx, move |name, folders, icon, color, indexed, cx| {
-                            let _ = weak.update(cx, |a, cx| {
-                                a.add_workspace(name, folders, icon, color, indexed);
-                                cx.notify();
+                .when(self.hovered_ws_header, |d| d
+                    .child(Button::new("new-workspace-header").ghost().xsmall()
+                        .w(px(24.0)).h(px(24.0)).rounded_md().justify_center()
+                        .border_1().border_color(t.border)
+                        .child(ui_icon("plus", 14.0, t.muted_foreground))
+                        .on_click(cx.listener(|_a, _, window, cx| {
+                            let weak = cx.entity().downgrade();
+                            open_workspace_dialog(window, cx, move |name, folders, icon, color, indexed, cx| {
+                                let _ = weak.update(cx, |a, cx| {
+                                    a.add_workspace(name, folders, icon, color, indexed);
+                                    cx.notify();
+                                });
                             });
-                        });
-                    }))))
+                        }))))
+                .when(!self.hovered_ws_header, |d| d
+                    .child(div().w(px(24.0)).h(px(24.0)).flex_shrink_0()))
+                .on_hover(cx.listener(|a, hovered, _, cx| {
+                    a.hovered_ws_header = *hovered;
+                    cx.notify();
+                })))
             // `#task-search`: the filter box only shows while Search is open.
             .children(self.search_open.then(|| {
+                // Same wrapper-focus workaround as the browser address field:
+                // the editor's hitbox alone misses clicks on this row.
                 let mut row = div().relative().flex().items_center().rounded_md().bg(surface)
                     .border_1().border_color(if query.is_empty() { t.border } else { t.accent })
-                    .px_2().min_h(px(30.0));
+                    .px_2().min_h(px(30.0))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                        this.search.update(cx, |state, cx| window.focus(&state.focus_handle(cx), cx));
+                    }));
                 row = row.child(div().flex_1().child(
                     Input::new(&self.search).bordered(false).appearance(false)
                         .h(px(30.0)).text_size(px(12.0)),
@@ -3195,16 +3828,28 @@ impl App {
                     .child(Label::new(if query.is_empty() { String::new() } else { format!("{} tasks", tasks.len()) })
                         .text_size(px(10.0)).text_color(t.muted_foreground))
             }))
-            // `.workspace-list`: each row carries its tasks indented under it.
-            .child(div().flex().flex_col().gap_3().flex_1().overflow_y_scrollbar()
-                .children(self.workspaces.iter().map(|ws| {
+            // `.workspace-list`: attention replaces the workspace list in this same area.
+            .child(if self.attention_only {
+                let weak = cx.entity().downgrade();
+                approved_commands_panel(&t, &self.approved_commands(), move |task_id, _window, cx| {
+                    let Ok(id) = task_id.parse::<u64>() else { return };
+                    let _ = weak.update(cx, |a, cx| {
+                        a.select_task(id);
+                        a.attention_only = false;
+                        cx.notify();
+                    });
+                }).flex_1().overflow_y_scrollbar().into_any_element()
+            } else {
+                div().flex().flex_col().gap_3().flex_1().overflow_y_scrollbar()
+                .children(self.workspaces.iter().map(|ws| { 
                     let t = t.clone();
                     let ws_id = ws.id.clone();
                     let ws_id2 = ws_id.clone();
                     let ws_id3 = ws_id.clone();
                     let ws_name = ws.name.clone();
-                    let ws_icon = ws.icon.clone();
                     let is_active = self.active_workspace_id.as_deref() == Some(&ws.id);
+                    let ws_hovered = self.hovered_workspace_id.as_deref() == Some(ws.id.as_str());
+                    let ws_id4 = ws.id.clone();
                     let ws_tasks: Vec<&Task> = self.tasks.iter()
                         .filter(|task| task.workspace_id.as_deref() == Some(&ws.id))
                         .filter(|task| self.task_shown(task, &q_lower))
@@ -3219,28 +3864,45 @@ impl App {
                                 a.select_workspace(&ws_id);
                                 cx.notify();
                             }))
+                            .on_hover(cx.listener(move |a, hovered, _, cx| {
+                                if *hovered {
+                                    a.hovered_workspace_id = Some(ws_id4.clone());
+                                } else if a.hovered_workspace_id.as_deref() == Some(ws_id4.as_str()) {
+                                    a.hovered_workspace_id = None;
+                                }
+                                cx.notify();
+                            }))
                             .when(is_active, |d| d.child(
                                 div().absolute().left_0().top_0().h_full().w(px(3.0)).bg(t.accent),
                             ))
-                            .child(Label::new(Self::ws_glyph(ws_icon.as_str())).text_size(px(14.0)))
+                            // The PWA paints every workspace with the same
+                            // folder line icon, tinted by the row's state.
+                            .child(ui_icon("workspace", 14.0, if is_active { t.accent } else { t.muted_foreground }))
                             .child(Label::new(ws_name.as_str()).text_size(px(13.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(if is_active { t.accent } else { t.foreground }))
                             .child(div().flex_1())
-                            .child(Button::new(format!("ws-new-task-{}", ws.id)).label("+").ghost().xsmall()
-                                .w(px(20.0)).h(px(20.0)).rounded_md().justify_center()
-                                .border_1().border_color(t.border)
-                                .on_click(cx.listener(move |a, _, _, cx| {
-                                    a.new_task_in_workspace(&ws_id2);
-                                    cx.notify();
-                                })))
-                            .child(Button::new(format!("ws-delete-{}", ws.id)).label("×").ghost().xsmall()
-                                .w(px(20.0)).h(px(20.0)).rounded_md().justify_center()
-                                .border_1().border_color(t.border)
-                                .on_click(cx.listener(move |a, _, _, cx| {
-                                    a.delete_workspace(&ws_id3);
-                                    cx.notify();
-                                }))))
+                            // The +/× sit in the row only while the pointer is
+                            // over it; the placeholder keeps the label from
+                            // shifting when they appear.
+                            .when(ws_hovered, |d| d
+                                .child(Button::new(format!("ws-new-task-{}", ws.id)).ghost().xsmall()
+                                    .w(px(20.0)).h(px(20.0)).rounded_md().justify_center()
+                                    .border_1().border_color(t.border)
+                                    .child(ui_icon("plus", 12.0, t.muted_foreground))
+                                    .on_click(cx.listener(move |a, _, _, cx| {
+                                        a.new_task_in_workspace(&ws_id2);
+                                        cx.notify();
+                                    })))
+                                .child(Button::new(format!("ws-delete-{}", ws.id)).label("×").ghost().xsmall()
+                                    .w(px(20.0)).h(px(20.0)).rounded_md().justify_center()
+                                    .border_1().border_color(t.border)
+                                    .on_click(cx.listener(move |a, _, _, cx| {
+                                        a.delete_workspace(&ws_id3);
+                                        cx.notify();
+                                    }))))
+                            .when(!ws_hovered, |d| d
+                                .child(div().w(px(48.0)).h(px(20.0)).flex_shrink_0())))
                         .children(ws_tasks.iter().map(|task| {
                             let t = t.clone();
                             let id = task.id;
@@ -3248,6 +3910,7 @@ impl App {
                             let status = task.status.clone();
                             let repo = task.repo.clone();
                             let is_active = self.active == Some(id);
+                            let task_hovered = self.hovered_task_id == Some(id);
 
                             let mut info = div().flex().items_center().gap_2()
                                 .child(div().w(px(6.0)).h(px(6.0)).rounded_full().flex_shrink_0()
@@ -3285,20 +3948,45 @@ impl App {
                                     a.select_task(id);
                                     cx.notify();
                                 }))
+                                .on_hover(cx.listener(move |a, hovered, _, cx| {
+                                    if *hovered {
+                                        a.hovered_task_id = Some(id);
+                                    } else if a.hovered_task_id == Some(id) {
+                                        a.hovered_task_id = None;
+                                    }
+                                    cx.notify();
+                                }))
                                 .when(is_active, |d| d.child(
                                     div().absolute().left_0().top_0().h_full().w(px(2.0)).bg(t.accent),
                                 ))
                                 .child(meta)
-                                .child(acts)
+                                .when(task_hovered, |d| d.child(acts))
+                                .when(!task_hovered, |d| d
+                                    .child(div().w(px(44.0)).h(px(20.0)).flex_shrink_0()))
                         }))
                 }))
-            )
-            // `.user-section`
+                .into_any_element()
+            })
+            // `.task-empty`: the rail says so when there is nothing to list.
+            .children((self.tasks.is_empty() && !self.attention_only).then(|| {
+                Label::new("No tasks yet. Start with a prompt.")
+                    .text_size(px(12.0)).text_color(t.muted_foreground).py_3()
+            }))
+            // `.user-section`: two outline chips, the PWA's `.github-account-button`
+            // shape — the account chip green-outlined once GitHub is connected,
+            // and a terracotta "Configure" chip that opens Settings.
             .child({
+                let connected = self.github.authenticated;
                 let github_label = self.github.account.as_ref()
-                    .map(|account| format!("GitHub · @{}", account.login))
-                    .unwrap_or_else(|| "GitHub · Sign in".into());
-                let github = Button::new("github-account").label(github_label.as_str()).ghost().xsmall()
+                    .map(|account| format!("@{}", account.login))
+                    .unwrap_or_else(|| "Local account".into());
+                let chip_color = if connected { t.green } else { t.muted_foreground };
+                let chip_border = if connected { t.green.opacity(0.45) } else { t.border };
+                let github = Button::new("github-account").ghost().xsmall()
+                    .flex().items_center().gap_2().px_2().py_1().rounded(px(5.0))
+                    .border_1().border_color(chip_border)
+                    .child(ui_icon("github", 14.0, chip_color))
+                    .child(Label::new(github_label).text_size(px(11.0)).text_color(chip_color))
                     .on_click(cx.listener(|a, _, _, cx| {
                         if a.github.authenticated {
                             a.toast("GitHub is connected through the local GitHub CLI.", false);
@@ -3307,21 +3995,16 @@ impl App {
                         }
                         cx.notify();
                     }));
+                let configure = Button::new("account-configure").ghost().xsmall()
+                    .flex().items_center().gap_2().px_2().py_1().rounded(px(5.0))
+                    .border_1().border_color(t.accent.opacity(0.5))
+                    .child(ui_icon("settings", 14.0, t.accent))
+                    .child(Label::new("Configure").text_size(px(11.0)).text_color(t.accent))
+                    .on_click(cx.listener(|a, _, window, cx| { a.open_settings(window, cx); }));
                 div().mt_auto().flex().items_center().justify_between().gap_3().pt_4().border_t_1().border_color(t.border)
                     .child(github)
+                    .child(configure)
             })
-            // My Attention: the commands the user already answered, click to jump.
-            .children(self.attention_only.then(|| {
-                let weak = cx.entity().downgrade();
-                approved_commands_panel(&t, &self.approved_commands(), move |task_id, _window, cx| {
-                    let Ok(id) = task_id.parse::<u64>() else { return };
-                    let _ = weak.update(cx, |a, cx| {
-                        a.select_task(id);
-                        a.attention_only = false;
-                        cx.notify();
-                    });
-                })
-            }))
     }
 
     fn center(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3369,9 +4052,13 @@ impl App {
                 .child(div().w(px(6.0)).h(px(6.0)).rounded_full().flex_shrink_0().bg(badge_dot))
                 .child(Label::new(status.clone()).text_size(px(12.0)).font_weight(FontWeight::MEDIUM))
         });
+        // The PWA's `.timeline-empty`: with no messages yet there is no run to
+        // head, so the header stays hidden and the pane asks the question
+        // instead. Once a run exists the header returns above the timeline.
+        let empty = tk.map(|tk| tk.msgs.is_empty()).unwrap_or(true) && !is_working;
 
         div().flex().flex_col().flex_1().overflow_hidden()
-            .child(div().flex().items_start().justify_between().gap_3().px_6().pt_4().pb_2()
+            .children((!empty).then(|| div().flex().items_start().justify_between().gap_3().px_6().pt_4().pb_2()
                 .border_b_1().border_color(t.border)
                 .child(div().flex().flex_col().gap_1().flex_1().overflow_hidden()
                     .child(Label::new(repo_line).font_family("monospace").text_size(px(11.0))
@@ -3382,25 +4069,37 @@ impl App {
                 .child(div().flex().items_center().gap_2().flex_shrink_0()
                     .child(stop)
                     .child(compact)
-                    .children(badge)))
-            .child(self.timeline(cx))
+                    .children(badge))))
+            .child(if empty {
+                div().flex_1().flex().items_center().justify_center().px_6()
+                    .child(div().flex().flex_col().items_center().gap_2().max_w(px(520.0)).py_10()
+                        .child(Label::new("What would you like to do?")
+                            .text_size(px(24.0)).font_weight(FontWeight::SEMIBOLD).text_color(t.foreground))
+                        .child(Label::new("Start with a small, concrete ask. Your work will stay here.")
+                            .text_size(px(15.0)).text_color(t.muted_foreground).text_center()))
+                    .into_any_element()
+            } else {
+                self.timeline(cx).into_any_element()
+            })
             .children(show_queue.then(|| self.queue(cx)))
             .child(self.composer(cx))
     }
 
     fn timeline(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
-        let msgs = self.task().map(|t| t.msgs.clone()).unwrap_or_default();
+        let task = self.task();
+        let empty_progress = fennec_ui::timeline::ProgressLines::default();
+        let msgs = task.map(|task| task.msgs.as_slice()).unwrap_or(&[]);
         // The live lines the run's in-flight calls last reported, read off the
         // task so a block can carry its own call's line while it draws.
-        let progress = self.task().map(|t| t.progress.clone()).unwrap_or_default();
+        let progress = task.map(|task| &task.progress).unwrap_or(&empty_progress);
         let weak = cx.entity().downgrade();
         let mut list = div().id("timeline-scroll").flex_1().track_scroll(&self.scroll_handle).overflow_y_scrollbar().px_6().py_4().flex().flex_col().gap_3();
         // The calls folded into one block per run, drawn where the run happened.
         let folds = fold_calls(&msgs, self.working(), &progress);
         // The clock the live block carries, read once for the whole draw.
         let run_secs = self.elapsed_secs();
-        for (mi, m) in msgs.into_iter().enumerate() {
+        for (mi, m) in msgs.iter().enumerate() {
             let id = m.id;
             // A settled call renders as a row inside its run's block, not as a
             // card of its own. The block the run is still inside is open, and the
@@ -3445,7 +4144,7 @@ impl App {
             if folds.hidden.contains(&mi) {
                 continue;
             }
-            match m.kind {
+            match &m.kind {
                 MsgKind::User => {
                     // The user's own words sit in an accent-tinted card with no
                     // identity chip, just the time and the message.
@@ -3653,7 +4352,7 @@ impl App {
         }
         let w_send = weak;
         col
-            .child(composer_dock(&t, &self.composer, "Ask Fennec to inspect, edit, test, or explain your code", !send_enabled))
+            .child(composer_dock(&t, &self.composer, "What are you trying to get done?", !send_enabled))
             .child(composer_toolbar(
                 &t,
                 &fennec_ui::plugin::default_plugins(),
@@ -3703,7 +4402,8 @@ impl App {
             let w_effort = weak;
             overlay = overlay.child(fennec_ui::controls::model_dropdown(
                 &t,
-                &self.model,
+                self.active_model(),
+                self.served_model(),
                 move |model, _window, cx| {
                     let _ = w_sel.update(cx, |a, cx| {
                         a.model = model;
@@ -3760,123 +4460,139 @@ impl App {
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let server_input = cx.new(|cx| {
-            let mut s = InputState::new(window, cx);
-            s.set_value(self.server_url.clone(), window, cx);
-            s
-        });
-        let engine_input = cx.new(|cx| {
-            let mut s = InputState::new(window, cx);
-            s.set_value(self.engine_url.clone(), window, cx);
-            s
-        });
-        let apikey_input = cx.new(|cx| {
-            let mut s = InputState::new(window, cx);
-            s.set_value(self.api_key.clone(), window, cx);
-            s
-        });
         let fontsize_input = cx.new(|cx| {
             let mut s = InputState::new(window, cx);
             s.set_value(self.font_size.to_string(), window, cx);
             s
         });
+        let note_title_input = cx.new(|cx| InputState::new(window, cx));
+        let note_folder_input = cx.new(|cx| InputState::new(window, cx));
+        let note_content_input = cx.new(|cx| InputState::new(window, cx));
+        let note_overwrite = Rc::new(Cell::new(false));
+        let backend_url = self.server_url.clone();
+        let response_tx = self.response_tx.clone();
+        let github = self.github.clone();
+        let github_repositories = self.github_repositories.clone();
+        let obsidian = self.obsidian.clone();
+        let capabilities = self.capabilities.clone();
         let weak = cx.entity().downgrade();
         let current_theme: Rc<RefCell<String>> = Rc::new(RefCell::new(self.theme.clone()));
-        let current_autosave = self.auto_save;
-        let current_notifications = self.notifications;
-        let current_debug = self.debug_mode;
-        let current_experimental = self.experimental_features;
+        // The content builder can re-run when the dialog layer is rebuilt, so the
+        // switches read their state from a mirror that outlives one build, not from
+        // a value captured when the dialog opened.
+        let autosave: Rc<Cell<bool>> = Rc::new(Cell::new(self.auto_save));
+        let notify: Rc<Cell<bool>> = Rc::new(Cell::new(self.notifications));
         let settings_path_for_theme = self.settings_path.clone();
         let active_tab: Rc<Cell<usize>> = Rc::new(Cell::new(0));
 
         window.open_dialog(cx, move |dialog, _, _| {
-            let server_input = server_input.clone();
-            let engine_input = engine_input.clone();
-            let apikey_input = apikey_input.clone();
             let fontsize_input = fontsize_input.clone();
+            let note_title_input = note_title_input.clone();
+            let note_folder_input = note_folder_input.clone();
+            let note_content_input = note_content_input.clone();
+            let note_overwrite = note_overwrite.clone();
+            let backend_url = backend_url.clone();
+            let response_tx = response_tx.clone();
+            let github = github.clone();
+            let github_repositories = github_repositories.clone();
+            let obsidian = obsidian.clone();
+            let capabilities = capabilities.clone();
             let weak = weak.clone();
             let current_theme = current_theme.clone();
             let settings_path_for_theme = settings_path_for_theme.clone();
             let active_tab = active_tab.clone();
+            let autosave = autosave.clone();
+            let notify = notify.clone();
 
             dialog
+                .w(px(640.0))
                 .title("Settings")
+                // The entrance animation drives the surface's alpha, and a
+                // dialog left mid-fade reads as see-through over the timeline;
+                // `None` paints the final opaque state in one frame.
+                .entrance(gpui_kit::component::dialog::DialogEntrance::None)
                 .content({
-                    let server_input = server_input.clone();
-                    let engine_input = engine_input.clone();
-                    let apikey_input = apikey_input.clone();
                     let fontsize_input = fontsize_input.clone();
+                    let note_title_input = note_title_input.clone();
+                    let note_folder_input = note_folder_input.clone();
+                    let note_content_input = note_content_input.clone();
+                    let note_overwrite = note_overwrite.clone();
+                    let backend_url = backend_url.clone();
+                    let response_tx = response_tx.clone();
+                    let github = github.clone();
+                    let github_repositories = github_repositories.clone();
+                    let obsidian = obsidian.clone();
+                    let capabilities = capabilities.clone();
                     let weak = weak.clone();
                     let current_theme = current_theme.clone();
                     let settings_path_for_theme = settings_path_for_theme.clone();
                     let active_tab = active_tab.clone();
+                    let autosave = autosave.clone();
+                    let notify = notify.clone();
                     move |content, _window, cx| {
                         let tab = active_tab.get();
-                        let tab_names = ["Connection", "Appearance", "Behavior", "Advanced"];
+                        let tab_names = ["Appearance", "GitHub", "Obsidian", "Behavior", "Advanced", "Integrations"];
+                        // Cards need a definite width, and so does card prose.
+                        // gpui resolves `w_full()` and measures a `Label` against
+                        // the parent's *padding* box, not its content box: inside
+                        // the content area a `w_full()` card came out 468px wide
+                        // while only ~454px is available, so it ran 11px past the
+                        // dialog's own right border and read as a card with no
+                        // right edge. Pinning the width instead keeps every tab's
+                        // cards on the same edges as the Close and Save controls.
+                        // 608 (row) - 140 (tab column, border included) - 12
+                        // (content-area inset) - 12 (right gutter) = 444.
+                        const CARD_W: f32 = 444.0;
+                        // Card content box: 444 - 2 (`border_1`) - 24 (`p_3`).
+                        const PROSE_W: f32 = 418.0;
 
                         content
                             .flex()
                             .flex_row()
-                            .gap_6()
-                            .h(px(480.0))
+                            // The dialog already insets `.content(...)` by 16px on
+                            // each side, so a fixed 640 row overflowed it by 32px and
+                            // the card text was clipped mid-word at the border. It also
+                            // sizes to its content, so the row needs a definite width:
+                            // `w_full()` here collapsed the dialog to min-content.
+                            .w(px(608.0))
+                            // `.settings-layout { min-height: 400px }`: short panels
+                            // hold the floor, tall ones grow and the dialog caps them.
+                            .min_h(px(400.0))
                             // Vertical tabs on the left
                             .child(
-                                div().w(px(150.0)).flex_shrink_0().flex().flex_col().gap_1()
+                                div().w(px(140.0)).flex_shrink_0().p_3().border_r_1().border_color(cx.theme().border)
+                                    .flex().flex_col().gap_0p5()
                                     .children(tab_names.iter().enumerate().map(|(i, name)| {
                                         let active_tab = active_tab.clone();
                                         let is_active = tab == i;
                                         let t = cx.theme().clone();
-                                        div().w_full()
-                                            .child(Button::new(format!("tab-{}", i))
-                                                .label(*name)
-                                                .ghost()
-                                                .small()
-                                                .w_full()
-                                                .justify_start()
-                                                .when(is_active, |b| b.bg(t.muted).border_l_2().border_color(t.accent))
-                                                .on_click(move |_, window, _cx| {
-                                                    active_tab.set(i);
-                                                    window.refresh();
-                                                }))
+                                        // Not a Button: it hard-codes `justify_center`
+                                        // after user styling, so the label stays centred.
+                                        div().id(ElementId::Name(format!("settings-tab-{i}").into()))
+                                            .w_full().h(px(36.0)).px_3().rounded_lg().cursor_pointer()
+                                            .flex().items_center()
+                                            .hover(|d| d.bg(fennec_ui::theme::hover()))
+                                            .when(is_active, |d| d.bg(t.muted).border_l_2().border_color(t.accent))
+                                            .child(
+                                                Label::new(*name)
+                                                    .id(ElementId::Name(format!("settings-tab-{i}-label").into()))
+                                                    .text_size(px(13.0)).text_color(t.foreground),
+                                            )
+                                            .on_click(move |_, window, _cx| {
+                                                active_tab.set(i);
+                                                window.refresh();
+                                            })
                                     }))
                             )
                             // Content area on the right
                             .child(
-                                div().flex_1().h_full().overflow_y_scrollbar().pr_2()
+                                div().flex_1().h_full().overflow_y_scrollbar().py_2()
                                     .children(match tab {
                                         0 => vec![
-                                            // Connection section
-                                            div().flex().flex_col().gap_4()
-                                                .child(div().flex().flex_col().gap_1()
-                                                    .child(Label::new("Connection").font_weight(FontWeight::BOLD).text_size(px(16.0)))
-                                                    .child(div().h(px(1.0)).bg(cx.theme().border).mt_1()))
-                                                .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
-                                                    .child(Label::new("Backend Server URL").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
-                                                    .child(Input::new(&server_input).h(px(32.0)))
-                                                    .child(Label::new("Coding agent backend (tasks, events, agents). Default: http://127.0.0.1:8787")
-                                                        .text_size(px(11.0)).text_color(cx.theme().muted_foreground))
-                                                )
-                                                .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
-                                                    .child(Label::new("Engine URL").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
-                                                    .child(Input::new(&engine_input).h(px(32.0)))
-                                                    .child(Label::new("Fennec inference engine. Default: http://127.0.0.1:8184")
-                                                        .text_size(px(11.0)).text_color(cx.theme().muted_foreground))
-                                                )
-                                                .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
-                                                    .child(Label::new("API Key").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
-                                                    .child(Input::new(&apikey_input).h(px(32.0)))
-                                                    .child(Label::new("Authentication key for engine access. Default: local")
-                                                        .text_size(px(11.0)).text_color(cx.theme().muted_foreground))
-                                                )
-                                                .into_any_element(),
-                                        ],
-                                        1 => vec![
                                             // Appearance section
-                                            div().flex().flex_col().gap_4()
-                                                .child(div().flex().flex_col().gap_1()
-                                                    .child(Label::new("Appearance").font_weight(FontWeight::BOLD).text_size(px(16.0)))
-                                                    .child(div().h(px(1.0)).bg(cx.theme().border).mt_1()))
-                                                .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                            div().flex().flex_col().gap_3().w_full()
+                                                .child(Label::new("Appearance").font_weight(FontWeight::SEMIBOLD).text_size(px(16.0)).mb_1())
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
                                                     .child(Label::new("Theme").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
                                                     .child(div().mt_2().gap_1().flex().flex_col()
                                                         .children({
@@ -3887,10 +4603,15 @@ impl App {
                                                             presets.into_iter().enumerate().map(move |(i, preset)| {
                                                                 let settings_path_clone = settings_path_clone.clone();
                                                                 let current_theme_cell_click = current_theme_cell.clone();
-                                                                let current_theme_cell_render = current_theme_cell.clone();
                                                                 let preset_id = preset.id().to_string();
                                                                 let preset_name = preset.name;
-                                                                Button::new(format!("theme-{}", i)).ghost().small().w_full().justify_start()
+                                                                let preset_bg = preset.background;
+                                                                let is_selected = preset_id == *current_theme_cell.borrow();
+                                                                // `.theme-item`: 36px tall, 12px side padding,
+                                                                // radius 8, active = surface + the accent edge.
+                                                                Button::new(format!("theme-{}", i)).ghost()
+                                                                    .w_full().h(px(36.0)).px_3().rounded_lg().justify_start()
+                                                                    .when(is_selected, |b| b.bg(dialog_theme.muted).border_l_2().border_color(dialog_theme.accent))
                                                                     .on_click(move |_, window, cx| {
                                                                         preset.apply(cx);
                                                                         *current_theme_cell_click.borrow_mut() = preset.id().to_string();
@@ -3910,60 +4631,166 @@ impl App {
                                                                     })
                                                                     .child({
                                                                         let t = dialog_theme.clone();
-                                                                        let is_selected = preset_id == *current_theme_cell_render.borrow();
+                                                                        // `.theme-swatch`: a 20px square, radius 4,
+                                                                        // hairline border, painted with that theme's
+                                                                        // own `--bg` ground.
                                                                         div().flex().items_center().gap_3().w_full()
-                                                                            .child(div().w(px(16.0)).h(px(16.0)).rounded_full()
-                                                                                .border_2().border_color(if is_selected { t.accent } else { t.border })
-                                                                                .when(is_selected, |d| d.bg(t.accent))
-                                                                                .child(if is_selected {
-                                                                                    div().w_full().h_full().flex().items_center().justify_center()
-                                                                                        .child(Label::new("✓").text_size(px(10.0)).text_color(t.background).font_weight(FontWeight::BOLD))
-                                                                                } else {
-                                                                                    div()
-                                                                                }))
-                                                                            .child(Label::new(preset_name).text_size(px(13.0)).font_weight(if is_selected { FontWeight::SEMIBOLD } else { FontWeight::NORMAL }))
-                                                                            .child(div().flex_1())
-                                                                            .when(is_selected, |d| d.child(Label::new("Active").text_size(px(10.0)).text_color(t.accent).font_weight(FontWeight::MEDIUM)))
+                                                                            .child(div().w(px(20.0)).h(px(20.0)).rounded_sm().border_1().border_color(t.border)
+                                                                                .bg(hsla(preset_bg[0], preset_bg[1], preset_bg[2], 1.0)))
+                                                                            .child(Label::new(preset_name).text_size(px(13.0)))
                                                                     })
                                                             })
                                                         })
                                                     )
                                                     .child(Label::new("Select a color theme. Changes apply immediately.")
-                                                        .text_size(px(11.0)).text_color(cx.theme().muted_foreground).mt_1())
+                                                        .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground).mt_1())
                                                 )
-                                                .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
                                                     .child(Label::new("Font Size").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
-                                                    .child(Input::new(&fontsize_input).h(px(32.0)))
+                                                    .child(Input::new(&fontsize_input).h(px(36.0)))
                                                     .child(Label::new("UI font size in pixels. Default: 14")
                                                         .text_size(px(11.0)).text_color(cx.theme().muted_foreground))
                                                 )
                                                 .into_any_element(),
                                         ],
+                                        1 => vec![
+                                            div().flex().flex_col().gap_3().w_full()
+                                                .child(Label::new("GitHub").font_weight(FontWeight::SEMIBOLD).text_size(px(16.0)).mb_1())
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                                    .child(Label::new("Account").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
+                                                    .child(Label::new(if github.authenticated {
+                                                        github.account.as_ref().map(|a| format!("Connected as @{}", a.login)).unwrap_or_else(|| "GitHub is connected.".into())
+                                                    } else {
+                                                        github.error.clone().unwrap_or_else(|| "GitHub is not authenticated.".into())
+                                                    }).w(px(PROSE_W)).text_size(px(13.0)).text_color(if github.authenticated { cx.theme().green } else { cx.theme().muted_foreground }))
+                                                    .child(Label::new("Uses the local GitHub CLI. Fennec never stores or displays your token.")
+                                                        .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground)))
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                                    .child(Label::new("Repositories").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
+                                                    .children(if github_repositories.repositories.is_empty() {
+                                                        vec![Label::new(github_repositories.error.clone().unwrap_or_else(|| "No repositories were returned.".into())).w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground).into_any_element()]
+                                                    } else {
+                                                        // One `.id()` per row: `Label::new` is
+                                                        // `#[track_caller]`, so twelve repos built
+                                                        // from this one call site would all claim
+                                                        // the same a11y id and abort the app.
+                                                        github_repositories.repositories.iter().take(12).enumerate().map(|(i, repo)| {
+                                                            Label::new(format!("{}{}", repo.full_name, if repo.private { " · private" } else { "" }))
+                                                                .id(ElementId::Name(format!("gh-repo-{i}").into()))
+                                                                .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().foreground).into_any_element()
+                                                        }).collect()
+                                                    }))
+                                                .into_any_element(),
+                                        ],
                                         2 => vec![
+                                            div().flex().flex_col().gap_3().w_full()
+                                                .child(Label::new("Obsidian").font_weight(FontWeight::SEMIBOLD).text_size(px(16.0)).mb_1())
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                                    .child(Label::new("Local vault").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
+                                                    .child(Label::new(if obsidian.configured {
+                                                        format!("Vault ready: {}", obsidian.vault.clone().unwrap_or_default())
+                                                    } else {
+                                                        obsidian.message.clone()
+                                                    }).w(px(PROSE_W)).text_size(px(13.0)).text_color(if obsidian.configured { cx.theme().green } else { cx.theme().muted_foreground }))
+                                                    .child(Label::new("Fennec writes only to the configured vault; Obsidian handles account login and Sync.")
+                                                        .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground)))
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                                    .child(Label::new("Write a note").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
+                                                    .child(Label::new("Title").w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground))
+                                                    .child(Input::new(&note_title_input).h(px(36.0)))
+                                                    .child(Label::new("Folder (optional)").w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground))
+                                                    .child(Input::new(&note_folder_input).h(px(36.0)))
+                                                    .child(Label::new("Content").w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground))
+                                                    .child(Input::new(&note_content_input).h(px(36.0)))
+                                                    .child({
+                                                        let note_overwrite = note_overwrite.clone();
+                                                        Button::new("obsidian-overwrite").ghost().small().justify_start()
+                                                            .label(if note_overwrite.get() { "Replace existing note: On" } else { "Replace existing note: Off" })
+                                                            .on_click(move |_, window, _cx| {
+                                                                note_overwrite.set(!note_overwrite.get());
+                                                                window.refresh();
+                                                            })
+                                                    })
+                                                    .child({
+                                                        let note_title_input = note_title_input.clone();
+                                                        let note_folder_input = note_folder_input.clone();
+                                                        let note_content_input = note_content_input.clone();
+                                                        let note_overwrite = note_overwrite.clone();
+                                                        let backend_url = backend_url.clone();
+                                                        let response_tx = response_tx.clone();
+                                                        Button::new("obsidian-write").primary().small().label("Write to Obsidian")
+                                                            .on_click(move |_, window, cx| {
+                                                                let title = note_title_input.read(cx).value().trim().to_string();
+                                                                let folder = note_folder_input.read(cx).value().trim().to_string();
+                                                                let content = note_content_input.read(cx).value().to_string();
+                                                                if title.is_empty() || content.trim().is_empty() {
+                                                                    window.push_notification(Notification::error("Enter a note title and content."), cx);
+                                                                    return;
+                                                                }
+                                                                let folder = (!folder.is_empty()).then_some(folder);
+                                                                let overwrite = note_overwrite.get();
+                                                                let backend_url = backend_url.clone();
+                                                                let response_tx = response_tx.clone();
+                                                                std::thread::spawn(move || {
+                                                                    let result = CodingAgentClient::with_base(backend_url)
+                                                                        .obsidian_write_note(&title, &content, folder.as_deref(), overwrite)
+                                                                        .map(|note| note.path);
+                                                                    let _ = response_tx.send(BackendResponse::ObsidianWrite(result));
+                                                                });
+                                                            })
+                                                    }))
+                                                .into_any_element(),
+                                        ],
+                                        3 => vec![
                                             // Behavior section
-                                            div().flex().flex_col().gap_4()
-                                                .child(div().flex().flex_col().gap_1()
-                                                    .child(Label::new("Behavior").font_weight(FontWeight::BOLD).text_size(px(16.0)))
-                                                    .child(div().h(px(1.0)).bg(cx.theme().border).mt_1()))
-                                                .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
-                                                    .child(div().flex().items_center().justify_between()
-                                                        .child(Label::new("Auto-save").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
-                                                        .child(Label::new(if current_autosave { "✓ Enabled" } else { "✗ Disabled" })
-                                                            .text_size(px(11.0)).text_color(if current_autosave { cx.theme().green } else { cx.theme().muted_foreground })))
-                                                    .child(Label::new("Automatically save task history and settings.")
-                                                        .text_size(px(11.0)).text_color(cx.theme().muted_foreground))
+                                            div().flex().flex_col().gap_3().w_full()
+                                                .child(Label::new("Behavior").font_weight(FontWeight::SEMIBOLD).text_size(px(16.0)).mb_1())
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                                    .child({
+                                                        let autosave = autosave.clone();
+                                                        let weak = weak.clone();
+                                                        Switch::new("auto-save").small().checked(autosave.get())
+                                                            .label("Auto-save tasks")
+                                                            .on_click(move |checked, window, cx| {
+                                                                let on = *checked;
+                                                                autosave.set(on);
+                                                                let _ = weak.update(cx, |a, _| {
+                                                                    a.auto_save = on;
+                                                                    // Switching it back on writes what the
+                                                                    // off interval accumulated; switching
+                                                                    // it off writes nothing new.
+                                                                    a.save();
+                                                                    a.flush_save();
+                                                                    a.save_settings();
+                                                                });
+                                                                window.refresh();
+                                                            })
+                                                    })
+                                                    .child(Label::new("Automatically save task history to disk")
+                                                        .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground))
                                                 )
-                                                .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
-                                                    .child(div().flex().items_center().justify_between()
-                                                        .child(Label::new("Notifications").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
-                                                        .child(Label::new(if current_notifications { "✓ Enabled" } else { "✗ Disabled" })
-                                                            .text_size(px(11.0)).text_color(if current_notifications { cx.theme().green } else { cx.theme().muted_foreground })))
-                                                    .child(Label::new("Show desktop notifications for task completion.")
-                                                        .text_size(px(11.0)).text_color(cx.theme().muted_foreground))
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                                    .child({
+                                                        let notify = notify.clone();
+                                                        let weak = weak.clone();
+                                                        Switch::new("notifications").small().checked(notify.get())
+                                                            .label("Desktop notifications")
+                                                            .on_click(move |checked, window, cx| {
+                                                                let on = *checked;
+                                                                notify.set(on);
+                                                                let _ = weak.update(cx, |a, _| {
+                                                                    a.notifications = on;
+                                                                    a.save_settings();
+                                                                });
+                                                                window.refresh();
+                                                            })
+                                                    })
+                                                    .child(Label::new("Show notifications for task completions")
+                                                        .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground))
                                                 )
-                                                .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
                                                     .child(Label::new("Clear History").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
-                                                    .child(Button::new("clear-history-btn").label("Clear all task history").ghost().small().mt_1()
+                                                    .child(div().flex().w_full().mt_1().child(Button::new("clear-history-btn").label("Clear all task history").ghost().small()
                                                         .on_click({
                                                             let weak = weak.clone();
                                                             move |_, window, cx| {
@@ -3972,42 +4799,26 @@ impl App {
                                                                     window.push_notification(Notification::info("History cleared."), cx);
                                                                 });
                                                             }
-                                                        }))
+                                                        })))
                                                     .child(Label::new("Remove all tasks and conversations.")
-                                                        .text_size(px(11.0)).text_color(cx.theme().muted_foreground))
+                                                        .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground))
                                                 )
                                                 .into_any_element(),
                                         ],
-                                        3 => vec![
-                                            // Advanced section
-                                            div().flex().flex_col().gap_4()
-                                                .child(div().flex().flex_col().gap_1()
-                                                    .child(Label::new("Advanced").font_weight(FontWeight::BOLD).text_size(px(16.0)))
-                                                    .child(div().h(px(1.0)).bg(cx.theme().border).mt_1()))
-                                                .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
-                                                    .child(div().flex().items_center().justify_between()
-                                                        .child(Label::new("Debug Mode").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
-                                                        .child(Label::new(if current_debug { "✓ Enabled" } else { "✗ Disabled" })
-                                                            .text_size(px(11.0)).text_color(if current_debug { cx.theme().green } else { cx.theme().muted_foreground })))
-                                                    .child(Label::new("Enable verbose logging and debug information.")
-                                                        .text_size(px(11.0)).text_color(cx.theme().muted_foreground))
-                                                )
-                                                .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
-                                                    .child(div().flex().items_center().justify_between()
-                                                        .child(Label::new("Experimental Features").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
-                                                        .child(Label::new(if current_experimental { "✓ Enabled" } else { "✗ Disabled" })
-                                                            .text_size(px(11.0)).text_color(if current_experimental { cx.theme().green } else { cx.theme().muted_foreground })))
-                                                    .child(Label::new("Enable unstable features (AG-UI protocol, new samplers).")
-                                                        .text_size(px(11.0)).text_color(cx.theme().muted_foreground))
-                                                )
-                                                .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                        4 => vec![
+                                            // Advanced section. The PWA also shows Debug mode
+                                            // and Experimental features here; neither has a
+                                            // native row because no code read either flag.
+                                            div().flex().flex_col().gap_3().w_full()
+                                                .child(Label::new("Advanced").font_weight(FontWeight::SEMIBOLD).text_size(px(16.0)).mb_1())
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
                                                     .child(Label::new("Data Directory").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
                                                     .child(Label::new(format!("{}", settings_path_for_theme.parent().unwrap_or(&settings_path_for_theme).display()))
-                                                        .text_size(px(11.0)).text_color(cx.theme().muted_foreground).font_family("monospace"))
+                                                        .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground).font_family("monospace"))
                                                 )
-                                                .child(div().flex().flex_col().gap_2().p_3().rounded_md().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
                                                     .child(Label::new("Export Settings").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
-                                                    .child(Button::new("export-settings-btn").label("Export to JSON").ghost().small().mt_1()
+                                                    .child(div().flex().w_full().mt_1().child(Button::new("export-settings-btn").label("Export to JSON").ghost().small()
                                                         .on_click({
                                                             let weak = weak.clone();
                                                             move |_, window, cx| {
@@ -4016,8 +4827,28 @@ impl App {
                                                                     window.push_notification(Notification::info("Settings exported."), cx);
                                                                 });
                                                             }
-                                                        }))
+                                                        })))
                                                 )
+                                                .into_any_element(),
+                                        ],
+                                        5 => vec![
+                                            // `.w_full()` on the column and the cards sizes
+                                            // them to the content area; the prose labels need
+                                            // `PROSE_W` on top of that, because the card's own
+                                            // padding is not subtracted from their measure.
+                                            div().flex().flex_col().gap_3().w_full()
+                                                .child(Label::new("Integrations").font_weight(FontWeight::SEMIBOLD).text_size(px(16.0)).mb_1())
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                                    .child(Label::new("Nod / n8n bridge").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
+                                                    .child(Label::new("Native Rust stdio MCP server: fennec-nod").w(px(PROSE_W)).text_size(px(13.0)).text_color(cx.theme().green))
+                                                    .child(Label::new("Connect n8n or another MCP host to the local Fennec tools without Node.js or stored credentials.")
+                                                        .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground)))
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                                    .child(Label::new("Backend capability contract").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
+                                                    .child(Label::new(capabilities.as_ref().map(|c| format!("{} {} · protocol {}", c.backend, c.version, c.protocol_version)).unwrap_or_else(|| "Backend capabilities are unavailable.".into()))
+                                                        .w(px(PROSE_W)).text_size(px(13.0)).text_color(if capabilities.is_some() { cx.theme().green } else { cx.theme().muted_foreground }))
+                                                    .child(Label::new(capabilities.as_ref().map(|c| c.features.join(" · ")).unwrap_or_else(|| "Start fennec-agent to load integration capabilities.".into()))
+                                                        .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground)))
                                                 .into_any_element(),
                                         ],
                                         _ => vec![],
@@ -4030,28 +4861,13 @@ impl App {
                         .on_click(|_, window, cx| { window.close_dialog(cx); }))
                     .child(Button::new("settings-save").label("Save").primary()
                         .on_click({
-                            let server_input = server_input.clone();
-                            let engine_input = engine_input.clone();
-                            let apikey_input = apikey_input.clone();
                             let fontsize_input = fontsize_input.clone();
                             let weak = weak.clone();
                             move |_, window, cx| {
-                                let server_url = server_input.read(cx).value().trim().to_string();
-                                let engine_url = engine_input.read(cx).value().trim().to_string();
-                                let api_key = apikey_input.read(cx).value().trim().to_string();
                                 let font_size_str = fontsize_input.read(cx).value().trim().to_string();
                                 let font_size = font_size_str.parse::<f32>().unwrap_or(14.0);
 
                                 let _ = weak.update(cx, |a, cx| {
-                                    if !server_url.is_empty() {
-                                        a.server_url = server_url;
-                                    }
-                                    if !engine_url.is_empty() {
-                                        a.engine_url = engine_url;
-                                    }
-                                    if !api_key.is_empty() {
-                                        a.api_key = api_key;
-                                    }
                                     a.font_size = font_size;
                                     a.save_settings();
                                     a.fetch_backend_info();
@@ -4094,10 +4910,121 @@ impl App {
             }
             Err(e) => (String::new(), e.to_string(), true),
         };
-        self.open_file = Some(FileView { path, name, body, meta, failed });
+        self.open_file = Some(FileView { path, name, body, meta, failed, image: None });
         // A pane the user had hidden would show nothing; opening it is part of
-        // the click that asked to see the file.
+        // the click that asked to see the file. The viewer lives on the Files tab
+        // now, so the card has to reveal the tab it is on or the click reads as
+        // doing nothing.
         self.inspector = true;
+        self.insp_tab = InspTab::Files;
+    }
+
+    /// Switch the inspector to one of its three views. Files asks for its first
+    /// listing when it is opened rather than at launch: the loop may not be up
+    /// yet, and a listing nobody asked for is a read of the disk.
+    fn set_insp_tab(&mut self, tab: InspTab, cx: &mut Context<Self>) {
+        let changed = self.insp_tab != tab;
+        self.insp_tab = tab;
+        if tab == InspTab::Files && !self.fm.loaded {
+            let path = self.fm.path.clone();
+            self.load_fm(path);
+        }
+        if changed {
+            self.save_settings();
+        }
+        cx.notify();
+    }
+
+    /// One directory of the folder the runs work in, asked of the loop so the
+    /// jail that refuses a run's out-of-tree path refuses the pane too.
+    fn load_fm(&mut self, path: String) {
+        self.fm_seq += 1;
+        let seq = self.fm_seq;
+        self.fm.path = path.clone();
+        self.fm.loaded = true;
+        self.fm.rows.clear();
+        self.fm.note = "reading…".to_string();
+        let url = self.server_url.clone();
+        let tx = self.response_tx.clone();
+        let workspace = workspace_param(&self.core_workspace());
+        std::thread::spawn(move || {
+            let client = CodingAgentClient::with_base(url);
+            let result = client.work_files(&path, &workspace).and_then(decode_listing);
+            let _ = tx.send(BackendResponse::WorkFiles { seq, result });
+        });
+    }
+
+    /// The folder a listed entry lives in, in the slash form the jail accepts.
+    fn fm_child(&self, name: &str) -> String {
+        let base = self.fm.path.trim_end_matches(['\\', '/']);
+        if base.is_empty() || base == "." { name.to_string() } else { format!("{base}/{name}") }
+    }
+
+    fn fm_up(&mut self) {
+        if self.fm.path == "." || self.fm.path.is_empty() {
+            return;
+        }
+        let parts: Vec<&str> = self.fm.path.trim_end_matches(['\\', '/']).split(['/', '\\']).collect();
+        let parent = if parts.len() > 1 { parts[..parts.len() - 1].join("/") } else { ".".into() };
+        self.load_fm(parent);
+    }
+
+    /// A listed file opens in the viewer a delivered card uses — one panel, and
+    /// the same cap on what it can hold — but read through the jail route.
+    fn open_fm_file(&mut self, path: String, name: String) {
+        self.file_seq += 1;
+        let seq = self.file_seq;
+        let fallback = jail_path(&self.fm.root, &path);
+        self.open_file = Some(FileView {
+            path: fallback.clone(), name: name.clone(), body: String::new(),
+            meta: "reading…".to_string(), failed: false, image: None,
+        });
+        // The block is pinned above the scrolling list, so it is on screen the
+        // moment a file opens, however far the listing below it is scrolled.
+        let url = self.server_url.clone();
+        let tx = self.response_tx.clone();
+        let workspace = workspace_param(&self.core_workspace());
+        std::thread::spawn(move || {
+            let client = CodingAgentClient::with_base(url);
+            let result = client.work_file(&path, &workspace).and_then(decode_file);
+            let _ = tx.send(BackendResponse::WorkFile { seq, name, fallback, result });
+        });
+    }
+
+    fn browse_go(&mut self, raw: String) {
+        let target = raw.trim().to_string();
+        if target.is_empty() {
+            return;
+        }
+        self.br_seq += 1;
+        let seq = self.br_seq;
+        if self.br.hist.last().map(String::as_str) != Some(target.as_str()) {
+            self.br.hist.push(target.clone());
+        }
+        self.br.target = target.clone();
+        self.br.meta = "reading…".to_string();
+        self.br.title.clear();
+        self.br.body.clear();
+        let url = self.server_url.clone();
+        let tx = self.response_tx.clone();
+        std::thread::spawn(move || {
+            let client = CodingAgentClient::with_base(url);
+            let result = client.browse(&target).and_then(decode_page);
+            let _ = tx.send(BackendResponse::Browse { seq, fallback: target, result });
+        });
+    }
+
+    /// ← over the addresses the user read. Nothing here needs the bound the PWA
+    /// puts on its frame: this pane never runs a page's scripts, so the only
+    /// navigations it can make are the ones asked for by hand.
+    fn browse_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.br.hist.len() < 2 {
+            return;
+        }
+        self.br.hist.pop();
+        let Some(prev) = self.br.hist.last().cloned() else { return };
+        self.br_input.update(cx, |input, cx| input.set_value(prev.clone(), window, cx));
+        self.browse_go(prev);
     }
 
     fn right(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4142,11 +5069,6 @@ impl App {
         let src_items: Vec<InspectItem> = sources.iter().enumerate().map(|(i, s)| InspectItem { id: format!("{i}"), title: s.clone(), subtitle: "file inspected".into(), detail: String::new(), url: None }).collect();
         let repo = self.repo_label();
         let branch = if self.branch.is_empty() { "—".to_string() } else { self.branch.clone() };
-        let engine = if self.engine.up {
-            [self.engine.model.as_str(), self.engine.tok_s.as_str()].into_iter()
-                .filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
-        } else { "Offline".to_string() };
-        let work_dir = self.work_dir().to_string_lossy().into_owned();
         // The browser lanes get one row each, in the order core reported them.
         // `fennec_client::outlet_rows` words them so this shell, the egui one and
         // the PWA describe the same probe in the same sentence, and so a loop that
@@ -4166,6 +5088,19 @@ impl App {
             let meta = f.meta.clone();
             let body = f.body.clone();
             let note = if f.failed { t.red } else { t.muted_foreground };
+            // One frame, two contents. A picture is fitted inside the box and the
+            // 300 px ceiling keeps a tall screenshot from pushing the rest of the
+            // pane off screen — the reason the PWA caps its `<img>` at 45vh. Text
+            // keeps scrolling instead, and no image is asked to scroll.
+            let frame: AnyElement = match f.image.clone() {
+                Some(image) => div().rounded_md().border_1().border_color(t.border).bg(t.muted)
+                    .p_2().child(img(ImageSource::Image(image)).w_full().max_h(px(300.0))
+                        .object_fit(ObjectFit::Contain)).into_any_element(),
+                None => div().rounded_md().border_1().border_color(t.border).bg(t.muted)
+                    .max_h(px(320.0)).overflow_y_scrollbar().p_2()
+                    .child(Label::new(body).font_family("monospace").text_size(px(11.0))
+                        .text_color(t.foreground)).into_any_element(),
+            };
             div().id("file-view").flex().flex_col().gap_1()
                 .child(div().id("file-head").flex().items_center().justify_between().mb_1()
                     .child(Label::new("FILE").text_size(px(10.0)).font_weight(FontWeight::SEMIBOLD)
@@ -4178,22 +5113,64 @@ impl App {
                 .child(Label::new(path).font_family("monospace").text_size(px(10.5))
                     .text_color(t.muted_foreground))
                 .child(Label::new(meta).text_size(px(11.0)).text_color(note))
-                .child(div().rounded_md().border_1().border_color(t.border).bg(t.muted)
-                    .max_h(px(320.0)).overflow_y_scrollbar().p_2()
-                    .child(Label::new(body).font_family("monospace").text_size(px(11.0))
-                        .text_color(t.foreground)))
+                .child(frame)
         });
-        div().w(px(300.0)).flex_shrink_0().bg(fennec_ui::theme::panel())
-            .border_l_1().border_color(t.border)
-            .flex().flex_col().gap_4().p_4().overflow_y_scrollbar()
-            .children(file_sec)
+        // The three views live in one column; only the open one is built, so a
+        // folder with a thousand rows costs nothing while the user reads the run.
+        let mut tabs: Vec<AnyElement> = Vec::new();
+        for tab in InspTab::ALL {
+            let active = self.insp_tab == tab;
+            tabs.push(
+                div().id(ElementId::Name(format!("insp-tab-{}", tab.as_str()).into()))
+                    .px_2().py_1().rounded_md().cursor_pointer()
+                    .when(active, |d| d.bg(t.muted))
+                    .child(Label::new(tab.label()).text_size(px(11.5))
+                        .font_weight(if active { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                        .text_color(if active { t.foreground } else { t.muted_foreground }))
+                    .on_click(cx.listener(move |a, _, _, cx| { a.set_insp_tab(tab, cx); }))
+                    .into_any_element(),
+            );
+        }
+
+        let mut fm_rows: Vec<AnyElement> = Vec::new();
+        if self.insp_tab == InspTab::Files {
+            for entry in self.fm.rows.iter() {
+                let path = self.fm_child(&entry.name);
+                let label = entry.name.clone();
+                let name = entry.name.clone();
+                let is_dir = entry.is_dir;
+                let size = if is_dir { String::new() } else { human_size(entry.size) };
+                fm_rows.push(
+                    div().id(ElementId::Name(format!("fm-row-{path}").into()))
+                        .flex().items_center().gap_2().px_2().py_1().rounded_md().cursor_pointer()
+                        .hover(|d| d.bg(t.muted))
+                        .on_click(cx.listener(move |a, _, _, cx| {
+                            if is_dir {
+                                a.load_fm(path.clone());
+                            } else {
+                                a.open_fm_file(path.clone(), label.clone());
+                            }
+                            cx.notify();
+                        }))
+                        .child(ui_icon(if is_dir { "workspace" } else { "file" }, 13.0,
+                            if is_dir { t.accent } else { t.muted_foreground }))
+                        .child(div().flex_1().overflow_hidden().child(
+                            Label::new(name).text_size(px(12.0)).text_color(t.foreground)))
+                        .when(!size.is_empty(), |d| d.child(
+                            Label::new(size).font_family("monospace").text_size(px(10.5))
+                                .text_color(t.muted_foreground).flex_shrink_0()))
+                        .into_any_element(),
+                );
+            }
+        }
+
+        let overview = div().flex().flex_col().gap_4()
             // `.agent-item`: the one agent that owns the run, else a note.
             .child(div().flex().flex_col().gap_2()
-                .child(insp_head("ACTIVE AGENTS", Some(agents_count), &t))
+                .child(insp_head("Working now", Some(agents_count), &t))
                 .when(working, |s| s.child(div().p_2().rounded_md().bg(t.muted)
                     .flex().items_center().gap_3()
-                    .child(div().w(px(28.0)).flex_shrink_0().flex().justify_center()
-                        .child(Label::new("🦊").text_size(px(20.0))))
+                    .child(brand_fox(&t, 28.0))
                     .child(div().flex().flex_col().flex_1().overflow_hidden()
                         .child(Label::new("Fennec").text_size(px(13.0))
                             .font_weight(FontWeight::SEMIBOLD))
@@ -4201,26 +5178,113 @@ impl App {
                             .text_color(t.muted_foreground))
                         .child(Label::new(format!("Running · {elapsed}")).text_size(px(11.0))
                             .text_color(t.accent)))))
-                .when(!working, |s| s.child(Label::new("No agents running.")
+                .when(!working, |s| s.child(Label::new("Nothing is running right now.")
                     .text_size(px(11.0)).text_color(t.muted_foreground))))
             // `.workspace-context`: one caption, then the six rows the PWA
             // shows under it, each saying what it holds rather than a bare count.
             .child(div().flex().flex_col().gap_1()
-                .child(insp_head("WORKSPACE CONTEXT", None, &t))
-                .child(inspect_section(&t, InspectSection { id: "subagents", icon: "👥", label: "Subagents", summary: "No active delegated agents".into(), items: sub_items }))
-                .child(inspect_section(&t, InspectSection { id: "processes", icon: "📡", label: "Processes", summary: "No commands running in the background".into(), items: proc_items }))
-                .child(inspect_section(&t, InspectSection { id: "skills", icon: "⚡", label: "Skills", summary: "Nothing beyond the built-in tools".into(), items: skill_items }))
-                .child(inspect_section(&t, InspectSection { id: "artifacts", icon: "📦", label: "Artifacts", summary: "0 task artifacts".into(), items: art_items }))
-                .child(inspect_section(&t, InspectSection { id: "web", icon: "🌐", label: "Web Readings", summary: "No linked readings".into(), items: web_items }))
-                .child(inspect_section(&t, InspectSection { id: "sources", icon: "🔗", label: "Sources", summary: "No task sources".into(), items: src_items })))
+                .child(insp_head("At a glance", None, &t))
+                .child(inspect_section(&t, InspectSection { id: "subagents", icon: "subagents", label: "Subagents", summary: "No one else is helping yet".into(), items: sub_items }))
+                .child(inspect_section(&t, InspectSection { id: "processes", icon: "clock", label: "Processes", summary: "Nothing running in the background".into(), items: proc_items }))
+                .child(inspect_section(&t, InspectSection { id: "skills", icon: "tool", label: "Skills", summary: "Nothing used yet".into(), items: skill_items }))
+                .child(inspect_section(&t, InspectSection { id: "artifacts", icon: "file", label: "Artifacts", summary: "0 artifacts".into(), items: art_items }))
+                .child(inspect_section(&t, InspectSection { id: "web", icon: "search", label: "Web readings", summary: "No readings yet".into(), items: web_items }))
+                .child(inspect_section(&t, InspectSection { id: "sources", icon: "queue", label: "Sources", summary: "No files opened yet".into(), items: src_items })))
             .child(div().flex().flex_col().gap_2()
-                .child(insp_head("ENVIRONMENT", None, &t))
+                .child(insp_head("Environment", None, &t))
                 .child(self.row("Repository", &repo, false, cx))
                 .child(self.row("Branch", &branch, !self.branch.is_empty(), cx))
-                .child(self.row("Working dir", &work_dir, false, cx))
-                .child(self.row("Engine", &engine, self.engine.up, cx))
                 .child(self.row("Backend", if self.backend_ok { "Connected" } else { "Offline" }, self.backend_ok, cx))
-                .children(outlet_rows_ui))
+                .children(outlet_rows_ui));
+
+        let files = div().flex().flex_col().gap_3()
+            .child(div().flex().items_center().gap_2()
+                .child(Button::new("fm-up").ghost().xsmall().w(px(24.0)).h(px(24.0))
+                    .rounded_md().border_1().border_color(t.border).justify_center()
+                    .child(Label::new("↑").text_size(px(13.0)).text_color(t.foreground))
+                    .on_click(cx.listener(|a, _, _, cx| { a.fm_up(); cx.notify(); })))
+                .child(div().flex_1().overflow_hidden().flex().flex_col()
+                    .child(Label::new(self.fm.path.clone()).font_family("monospace")
+                        .text_size(px(11.5)).text_color(t.foreground))
+                    .when(!self.fm.root.is_empty(), |d| d.child(
+                        Label::new(self.fm.root.clone()).font_family("monospace")
+                            .text_size(px(10.0)).text_color(t.muted_foreground))))
+                .child(Button::new("fm-refresh").ghost().xsmall().w(px(24.0)).h(px(24.0))
+                    .rounded_md().border_1().border_color(t.border).justify_center()
+                    .child(Label::new("⟳").text_size(px(13.0)).text_color(t.foreground))
+                    .on_click(cx.listener(|a, _, _, cx| {
+                        let path = a.fm.path.clone();
+                        a.load_fm(path);
+                        cx.notify();
+                    }))))
+            .children(fm_rows)
+            .when(!self.fm.note.is_empty(), |d| d.child(
+                Label::new(self.fm.note.clone()).text_size(px(11.0))
+                    .text_color(t.muted_foreground)));
+
+        let browser = div().flex().flex_col().gap_2()
+            .child(div().flex().items_center().gap_2()
+                .child(Button::new("br-back").ghost().xsmall().w(px(24.0)).h(px(28.0))
+                    .rounded_md().border_1().border_color(t.border).justify_center()
+                    .child(Label::new("←").text_size(px(13.0))
+                        .text_color(if self.br.hist.len() > 1 { t.foreground } else { t.muted_foreground }))
+                    .on_click(cx.listener(|a, _, window, cx| {
+                        a.browse_back(window, cx);
+                        cx.notify();
+                    })))
+                // Clicks landing on the wrapper miss the editor's own hitbox
+                // inside the scroll container, so focus the field explicitly.
+                .child(div().id("br-address").flex_1()
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                        this.br_input.update(cx, |state, cx| window.focus(&state.focus_handle(cx), cx));
+                    }))
+                    .child(Input::new(&self.br_input).h(px(28.0))))
+                .child(Button::new("br-go").label("Go").ghost().xsmall().h(px(28.0))
+                    .rounded_md().border_1().border_color(t.border)
+                    .text_color(t.accent)
+                    .on_click(cx.listener(|a, _, _, cx| {
+                        let target = a.br_input.read(cx).value().to_string();
+                        a.browse_go(target);
+                        cx.notify();
+                    }))))
+            .when(!self.br.meta.is_empty(), |d| d.child(
+                Label::new(self.br.meta.clone()).font_family("monospace").text_size(px(10.5))
+                    .text_color(t.muted_foreground)))
+            .when(!self.br.title.is_empty(), |d| d.child(
+                Label::new(self.br.title.clone()).text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)))
+            .when(!self.br.body.is_empty(), |d| d.child(
+                div().rounded_md().border_1().border_color(t.border).bg(t.muted)
+                    .max_h(px(420.0)).overflow_y_scrollbar().p_2()
+                    .child(Label::new(self.br.body.clone()).font_family("monospace")
+                        .text_size(px(11.0)).text_color(t.foreground))))
+            .when(self.br.body.is_empty() && self.br.meta.is_empty(), |d| d.child(
+                Label::new("Type an address and press Enter to read a page here — the same text the loop sees.")
+                    .text_size(px(11.0)).text_color(t.muted_foreground)));
+
+        let body: AnyElement = match self.insp_tab {
+            InspTab::Overview => overview.into_any_element(),
+            InspTab::Files => files.into_any_element(),
+            InspTab::Browser => browser.into_any_element(),
+        };
+
+        // Pinned between the tabs and the scrolling body, so the preview of the
+        // file just opened stays on screen however far the listing below it is
+        // scrolled — the shell cannot ask that container to scroll, because a
+        // tracked scroll container that grows to its content reports no range.
+        let preview = if self.insp_tab == InspTab::Files {
+            file_sec.map(|sec| div().px_4().pb_2().flex_shrink_0().child(sec))
+        } else {
+            None
+        };
+
+        div().w(px(self.inspector_width)).flex_shrink_0().bg(fennec_ui::theme::panel())
+            .border_l_1().border_color(t.border)
+            .flex().flex_col().overflow_hidden()
+            .child(div().flex().items_center().gap_1().px_4().pt_4().pb_2().flex_shrink_0()
+                .children(tabs))
+            .children(preview)
+            .child(div().id("inspector-scroll").flex_1().flex().flex_col().p_4().overflow_y_scrollbar().child(body))
     }
 
     /// `use<>` keeps the returned element from capturing the borrow of `cx` and of
@@ -4261,17 +5325,29 @@ fn main() {
     let path = data_dir.join("history.json");
     let settings_path = data_dir.join("settings.json");
 
-    application().with_assets(assets::Assets).run(move |cx| {
+    application().with_assets(fennec_ui::icons::FennecAssets).run(move |cx| {
         init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
         let bounds = Bounds::centered(None, size(px(1400.0), px(900.0)), cx);
         
         let settings_path_clone = settings_path.clone();
-        cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, |window, cx| {
+        cx.open_window(WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                // The caption itself is hidden, but the platform still shows this
+                // in the taskbar, the window switcher and any window picker.
+                title: Some("Fennec".into()),
+                appears_transparent: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }, |window, cx| {
             let composer = cx.new(|cx| InputState::new(window, cx));
             let search = cx.new(|cx| InputState::new(window, cx));
+            let br_input = cx.new(|cx| InputState::new(window, cx));
+            let repo_create_input = cx.new(|cx| InputState::new(window, cx));
             let view = cx.new(|cx| {
-                let mut app = App::new(path, settings_path_clone.clone(), composer, search, window, cx);
+                let mut app = App::new(path, settings_path_clone.clone(), composer, search, br_input, repo_create_input, window, cx);
                 app.load();
                 app.resume_runs();
                 app
@@ -4517,5 +5593,133 @@ mod fold_tests {
         let folds = fold_calls(&whole, true, &lines);
         assert!(!folds.at.is_empty());
         assert!(folds.hidden.contains(&1), "the block carries the line, not two rows");
+    }
+}
+
+/// The right pane's Files and Browser tabs read through the same two work routes
+/// and the same browse route as the PWA, so the shapes they agree on are pinned
+/// here rather than left to whatever the server happens to answer.
+#[cfg(test)]
+mod pane_tests {
+    // Named imports, not `use super::*`: the glob pulls gpui-kit's own `test`
+    // macro into scope and `#[test]` then expands against it forever.
+    use crate::{decode_file, decode_listing, decode_page, jail_path, workspace_param, BrState, FmState, InspTab};
+    use serde_json::json;
+
+    /// The pane's stored choice has to survive a restart, and the stored spelling
+    /// is the PWA's `fennec-insp-tab` value, so one settings file opened in the
+    /// other surface lands on the same tab.
+    #[test]
+    fn the_tab_names_are_the_ones_the_pwa_stores() {
+        let names: Vec<&str> = InspTab::ALL.iter().map(|tab| tab.as_str()).collect();
+        assert_eq!(names, vec!["overview", "files", "browser"]);
+        for tab in InspTab::ALL {
+            assert_eq!(InspTab::parse(tab.as_str()), Some(tab));
+        }
+        assert_eq!(InspTab::parse("plan"), None, "a stale name opens Overview, not a blank pane");
+    }
+
+    /// Folders above files and case kept out of the order, because a listing that
+    /// reshuffles itself between two refreshes cannot be scanned.
+    #[test]
+    fn a_listing_sorts_folders_first_and_ignores_case() {
+        let listing = decode_listing(json!({
+            "ok": true,
+            "root": "D:/work/site",
+            "entries": [
+                { "name": "zeta", "path": "zeta", "is_dir": false, "size": 10 },
+                { "name": "Alpha", "path": "Alpha", "is_dir": true, "size": 0 },
+                { "name": "beta.md", "path": "beta.md", "is_dir": false, "size": 2048 },
+            ],
+        }))
+        .unwrap();
+        let names: Vec<&str> = listing.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["Alpha", "beta.md", "zeta"]);
+        assert_eq!(listing.root, "D:/work/site");
+        assert_eq!(super::human_size(listing.rows[1].size), "2.0 KB");
+    }
+
+    /// A refusal carries the server's sentence, and an empty folder is not a
+    /// refusal — the pane words them differently, so the two must not collapse.
+    #[test]
+    fn an_empty_folder_and_a_refusal_stay_apart() {
+        let empty = decode_listing(json!({ "ok": true, "root": "D:/work", "entries": [] })).unwrap();
+        assert!(empty.rows.is_empty());
+        assert_eq!(
+            decode_listing(json!({ "ok": false, "error": "path escapes the workspace" })).unwrap_err(),
+            "path escapes the workspace"
+        );
+    }
+
+    /// A folder named `.` asks the jail for its own root; repeating it as a
+    /// workspace would re-send a path the server has already resolved.
+    #[test]
+    fn the_default_folder_asks_for_the_jails_own_root() {
+        assert_eq!(workspace_param(&FmState::default().path), "");
+        assert_eq!(workspace_param(""), "");
+        assert_eq!(workspace_param("D:/work/site/"), "D:/work/site/");
+    }
+
+    /// The route echoes the relative path it was handed, so the absolute name the
+    /// pane shows is built here — the same join the PWA's `joinPath` makes.
+    #[test]
+    fn a_row_path_joins_the_root_the_jail_reported() {
+        assert_eq!(jail_path("D:/work/site", "src/app.rs"), "D:/work/site/src/app.rs");
+        assert_eq!(jail_path("D:\\work\\site", "src/app.rs"), "D:\\work\\site\\src\\app.rs");
+        assert_eq!(
+            jail_path("D:\\Fennec-Suite", "docs/desktop-ab.html"),
+            "D:\\Fennec-Suite\\docs\\desktop-ab.html",
+            "a Windows path shows one separator, the way the PWA renders it"
+        );
+        assert_eq!(jail_path("", "src/app.rs"), "src/app.rs", "no root, no guess");
+        assert_eq!(jail_path("D:/work", "D:/elsewhere/x.rs"), "D:/elsewhere/x.rs");
+        assert_eq!(jail_path("D:/work", "/etc/hosts"), "/etc/hosts");
+        assert_eq!(jail_path("D:/work", ""), "");
+    }
+
+    /// One line never reads "1 lines", and the size follows the count, which is
+    /// the order the PWA prints them in.
+    #[test]
+    fn a_preview_says_lines_then_size() {
+        assert_eq!(decode_file(json!({ "ok": true, "content": "a\n", "lines": 1, "bytes": 2 })).unwrap().meta, "1 line · 2 B");
+        assert_eq!(decode_file(json!({ "ok": true, "content": "a\nb\n", "lines": 2, "bytes": 4 })).unwrap().meta, "2 lines · 4 B");
+        assert_eq!(decode_file(json!({ "ok": false, "error": "binary file" })).unwrap_err(), "binary file");
+    }
+
+    /// The route answers a picture with base64 bytes, and the pane paints them
+    /// rather than printing a lossy decode of them as a wall of U+FFFD.
+    #[test]
+    fn a_preview_answer_with_pixels_is_not_text() {
+        let read = decode_file(json!({
+            "ok": true, "kind": "image", "mime": "image/png",
+            "data": "iVBORw0KGgo=", "bytes": 8,
+        })).unwrap();
+        assert_eq!(read.meta, "image/png · 8 B");
+        assert!(read.body.is_empty());
+        // The PNG signature, whole: what a text decode would have mangled.
+        assert_eq!(read.image.unwrap().bytes, vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(
+            decode_file(json!({ "ok": true, "kind": "image", "mime": "image/avif", "data": "AAA=" }))
+                .unwrap_err(),
+            "This pane has no decoder for image/avif."
+        );
+    }
+
+    /// The address worth showing is the one the redirects landed on, which the
+    /// route reports; the text is what the agent was handed, so a truncation has
+    /// to stay visible instead of passing for the whole page.
+    #[test]
+    fn a_page_read_keeps_the_answer_it_landed_on() {
+        let page = decode_page(json!({
+            "ok": true, "url": "https://example.com/final", "status": 200,
+            "title": "Example", "text": "_BODY_", "truncated": true,
+        }))
+        .unwrap();
+        assert_eq!(page.url, "https://example.com/final");
+        assert_eq!((page.status, page.title.as_str(), page.text.as_str()), (200, "Example", "_BODY_"));
+        assert!(page.truncated);
+        assert_eq!(decode_page(json!({ "ok": false, "error": "dns failed" })).unwrap_err(), "dns failed");
+        // A pane that has never read anything has no history to walk back over.
+        assert!(BrState::default().hist.is_empty());
     }
 }
