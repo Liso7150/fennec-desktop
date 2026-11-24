@@ -26,7 +26,7 @@ binary, and a release build of it needs `fxc.exe` from the Windows SDK to compil
 
 | UI | Backend | Compaction | Tests | Platforms |
 |---|---|---|---|---|
-| native window, gpui-kit (`gui` feature) | Rust/Axum PWA/API `127.0.0.1:8787` (fallback `:8788`), engine SSE `127.0.0.1:8184` | `fennec-economy`, in-process | 47 | Windows, macOS, Linux |
+| native window, gpui-kit (`gui` feature) | agent server `127.0.0.1:8787`, engine SSE `127.0.0.1:8184` | `fennec-economy`, in-process | 55 | Windows, macOS, Linux |
 
 ## Architecture
 
@@ -62,10 +62,10 @@ selector shows is what `fennec update` keeps current.
 > direct chat mode, so the tool timeline is empty and says so; features with no backend
 > registry are shown as unavailable instead of being faked — the composer's image, record and
 > read-aloud buttons stay disabled, each tooltip naming the reason. For images the reason comes
-> from the engine: `/health` answers with either a `vision` flag or an `input_modalities` list
-> (the Fennec engine declares `vision: false`; a Colibri server lists `image`), and an engine
-> that never answered is reported as this shell having no attachment path, because that is the
-> blocker either way. The Environment pane mirrors the same three states in its Vision row.
+> from the engine: `/health` answers with either a `vision` flag (the Fennec engine declares
+> `vision: false`) or an `input_modalities` list, which is read as the same three states, and an
+> engine that never answered is reported as this shell having no attachment path, because that is
+> the blocker either way. The Environment pane mirrors the same three states in its Vision row.
 
 ## Build and run
 
@@ -75,7 +75,7 @@ The app path-depends on the sibling `fennec-core` checkout, so fetch the repos t
 ```bash
 cargo build  --features gui --offline  # ./target/debug/fennec-desktop-gui(.exe)
 cargo build  --release --features gui --offline   # needs fxc.exe on Windows
-cargo test --offline --features gui                   # 47 tests
+cargo test --offline --features gui                   # 55 tests
 ```
 
 The engine and the Rust/Axum coding-agent backend start independently of the app; the
@@ -93,8 +93,8 @@ checked by Computer Use against the running app.
 ## Which engine answers
 
 Resolution order comes from `fennec-client`: the manifest's `engine_root` first, then the home
-engine checkout, then a legacy Colibri checkout only as a last resort. An already-running
-engine is attached to, never restarted.
+`Fennec` checkout, and only Fennec's own binary names are probed — no other engine is resolved.
+An already-running engine is attached to, never restarted.
 
 ## Security posture
 
@@ -105,9 +105,9 @@ you instead — the run waits on the answer, and a timeout or cancel is a reject
 is read, written or displayed. The UI has no web view, so there is no DOM and no script
 injection surface. Both services are loopback-only.
 
-External connectors remain core-owned and do not change the native UI boundary. Nod connects through
-Fennec Core's opt-in, read-only MCP endpoint. Obsidian is not integrated; a future vault connector
-would be opt-in and approval-gated, with no embedded Node.js, Electron, or Obsidian runtime.
+External connectors do not change the native UI boundary. Nod uses the native Rust stdio endpoint
+from `fennec-coding-agent`; Obsidian uses its opt-in local-vault writer. Neither is embedded in the
+desktop window, and neither adds a Node.js, Electron, webview, or Obsidian runtime.
 
 ## Credits
 
