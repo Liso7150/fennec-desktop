@@ -775,6 +775,11 @@ impl App {
 
     /// Where history is saved. Uses LOCALAPPDATA on Windows, XDG_DATA_HOME or
     /// ~/.local/share on Linux, ~/Library/Application Support on macOS.
+    ///
+    /// The file is this shell's own, not the shipped app's: the gpui binary
+    /// writes `history.json` beside it with an incompatible schema (numeric
+    /// task ids, inline messages, no `timelines`), and each reader treats the
+    /// other's document as corrupt — then overwrites it on its next save.
     fn history_path() -> Option<PathBuf> {
         let base = if cfg!(target_os = "windows") {
             std::env::var("LOCALAPPDATA").ok().map(PathBuf::from)
@@ -784,11 +789,18 @@ impl App {
             std::env::var("XDG_DATA_HOME").ok().map(PathBuf::from)
                 .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/share")))
         }?;
-        Some(base.join("fennec-desktop").join("history.json"))
+        Some(base.join("fennec-desktop").join("history-egui.json"))
     }
 
     /// Save current tasks and timelines to disk. Called on meaningful state changes.
     fn save_history(&self) {
+        // Painting a headless frame creates the same draft a focused composer
+        // creates for real, so without this gate `cargo test` writes a history
+        // file into whoever's machine is running it. `load_history` is gated
+        // for the same reason.
+        if cfg!(test) {
+            return;
+        }
         let Some(path) = Self::history_path() else { return };
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
