@@ -49,10 +49,20 @@ Fetch the suite together so the `fennec-core`, `fennec-economy`, and `fennec-ui`
 ```bash
 cargo build --features gui --bin fennec-desktop-gui --offline
 cargo build --release --features gui --bin fennec-desktop-gui --offline
-cargo test --offline --features gui                   # 59 tests
+cargo test --offline --features gui                   # 66 tests
 ```
 
 The debug binary is `target/debug/fennec-desktop-gui` (`.exe` on Windows). Windows release shader compilation requires `fxc.exe` from the Windows SDK.
+
+## Installers
+
+The release workflow builds three native installers alongside the portable archives:
+
+- **Windows:** `FennecDesktop-<version>-windows-<arch>-setup.exe`, a per-user NSIS wizard with install-folder, shortcut, install, and launch steps.
+- **macOS:** `FennecDesktop-<version>-macos-<arch>.dmg`, containing `Fennec.app`, an `Install Fennec.pkg` installer wizard, and an Applications shortcut.
+- **Linux:** `FennecDesktop-<version>-linux-<arch>.deb`, with a desktop entry, application icon, and `/usr/bin/fennec-desktop` launcher.
+
+The release job refuses to publish unless all three installer formats exist, then verifies their checksums with the portable assets. Packages are unsigned; Windows Smart App Control remains off by user choice.
 
 Start the canonical service in the core checkout:
 
@@ -61,6 +71,14 @@ python server.py serve
 ```
 
 Then launch `fennec-desktop-gui`. Core starts the Fennec engine on demand. The optional Rust service may run separately for chat and integrations; it is not required for coding.
+
+## First-run setup
+
+A fresh profile offers the native setup wizard when neither a shared Fennec configuration nor earlier desktop data exists. Existing users are not blocked; rerun it from **Settings → Advanced → Run Setup Wizard**.
+
+The wizard checks Python 3.10+, Git, Rust/Cargo, core Python dependencies, the built Fennec engine, and `fennec-core/setup_wizard.py`. It follows the system light/dark theme while open and restores the selected app theme on close. It offers explicit `winget` actions on Windows and Homebrew actions on macOS when those package managers are available; Linux shows manual package-manager commands. Engine, suite, model, and cache folders have native folder pickers.
+
+Model scanning uses the core classifier. Select a ready local checkpoint or opt into the recommended `Liso/qwen36-35b-colibri` Fennec-ready int4 download (22.78 GiB). Finish invokes the core setup helper with argument arrays, writes the shared configuration atomically, and backs up an existing file. Secrets remain in environment variables. **Not now** dismisses first-run setup for that desktop profile without writing the shared configuration.
 
 ## Service configuration
 

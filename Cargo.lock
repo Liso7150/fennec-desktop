@@ -2129,6 +2129,7 @@ dependencies = [
  "cpal",
  "dirs 5.0.1",
  "eframe",
+ "embed-resource",
  "fennec-client",
  "fennec-economy",
  "fennec-ui",

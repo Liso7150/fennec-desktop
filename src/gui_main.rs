@@ -25,7 +25,6 @@ use fennec_ui::theme::{find_preset_index, theme_presets};
 use fennec_ui::timeline::{CallShape, GroupRow, block_open, block_title, clock, kind_of, live_stretch, reveal_text, short_text, unique_actions};
 use fennec_ui::widgets::{action_card, attachment_card, attachment_chips, brand_fox, composer_dock, composer_toolbar, msg_card, msg_footer, queue_strip, QueueAction, QueueItem, QueueOwner as UiQueueOwner, show_output, speak_tts, tool_group, user_card};
 use fennec_ui::workspace_dialog::open_workspace_dialog;
-use gpui_kit::base::Root;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable, WindowExt,
     button::{Button, ButtonVariants},
@@ -44,6 +43,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
+
+pub use fennec_desktop::setup;
+mod setup_wizard;
 
 const SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 const MAX_STT_SECONDS: usize = 120;
@@ -662,6 +664,10 @@ struct Settings {
     /// simply has no value, and the pane opens on Overview.
     #[serde(default)]
     insp_tab: Option<String>,
+    #[serde(default)]
+    setup_completed_version: Option<String>,
+    #[serde(default)]
+    setup_skipped: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -764,6 +770,11 @@ struct App {
     allow_web: bool,
     ask_each: bool,
     settings_path: PathBuf,
+    setup_completed_version: Option<String>,
+    setup_skipped: bool,
+    setup: Option<Rc<RefCell<setup::WizardState>>>,
+    setup_system_theme: bool,
+    setup_appearance_subscription: Option<gpui_kit::Subscription>,
     /// fennec-core owns supervised coding. The Rust service remains available
     /// for chat-only and integration routes, never as an automatic coding route.
     core: Core,
@@ -1072,6 +1083,7 @@ enum BackendResponse {
     Core(CoreEvent),
     Stt(Result<String, String>),
     ObsidianWrite(Result<String, String>),
+    Setup(setup::SetupEvent),
     /// Inspector reads. Each carries the number its own request took so a late
     /// answer cannot paint a folder or a page the user has navigated away from.
     WorkFiles { seq: usize, result: Result<FmListing, String> },
@@ -1242,6 +1254,8 @@ impl App {
         let insp_tab = settings.insp_tab.as_deref()
             .and_then(InspTab::parse)
             .unwrap_or(InspTab::Overview);
+        let setup_completed_version = settings.setup_completed_version.clone();
+        let setup_skipped = settings.setup_skipped;
         let mut app = Self {
             tasks: vec![], active: None, queued: vec![], inspector: true,
             rail_width, inspector_width, pane_drag: None,
@@ -1262,6 +1276,8 @@ impl App {
             composer_restore: None,
             allow_write, allow_shell, allow_web, ask_each,
             settings_path: settings_path.clone(),
+            setup_completed_version, setup_skipped, setup: None, setup_system_theme: false,
+            setup_appearance_subscription: None,
             core: Core { base: bases.core.clone() }, core_up: false, rust_up: false, core_root: String::new(),
             outlets: Vec::new(), outlets_known: false, github: GithubAccountStatus::default(),
             github_repositories: GithubRepositoryStatus::default(), obsidian: ObsidianStatus::default(),
@@ -1582,6 +1598,8 @@ impl App {
             rail_width: Some(self.rail_width),
             inspector_width: Some(self.inspector_width),
             insp_tab: Some(self.insp_tab.as_str().to_string()),
+            setup_completed_version: self.setup_completed_version.clone(),
+            setup_skipped: self.setup_skipped,
         };
         if let Ok(s) = serde_json::to_string_pretty(&s) {
             let tmp = self.settings_path.with_extension("json.tmp");
@@ -1763,6 +1781,7 @@ impl App {
                         Err(error) => self.toast(format!("Obsidian write failed: {error}"), false),
                     }
                 }
+                BackendResponse::Setup(event) => self.apply_setup_event(event, cx),
                 BackendResponse::WorkFiles { seq, result } => {
                     if seq != self.fm_seq { continue; }
                     match result {
@@ -4605,6 +4624,19 @@ impl App {
                                                         .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground).font_family("monospace"))
                                                 )
                                                 .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
+                                                    .child(Label::new("Setup Wizard").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
+                                                    .child(Label::new("Check Python, Git, Rust, engine paths, core dependencies, and models; rewrite the shared runtime configuration.")
+                                                        .w(px(PROSE_W)).text_size(px(11.0)).text_color(cx.theme().muted_foreground))
+                                                    .child(Button::new("run-setup-wizard").label("Run Setup Wizard").ghost().small()
+                                                        .on_click({
+                                                            let weak = weak.clone();
+                                                            move |_, window, cx| {
+                                                                window.close_dialog(cx);
+                                                                let _ = weak.update(cx, |app, cx| app.open_setup_wizard(window, cx, false));
+                                                            }
+                                                        }))
+                                                )
+                                                .child(div().flex().flex_col().gap_2().p_3().w(px(CARD_W)).rounded_lg().bg(cx.theme().muted).border_1().border_color(cx.theme().border)
                                                     .child(Label::new("Export Settings").font_weight(FontWeight::SEMIBOLD).text_size(px(12.0)))
                                                     .child(div().flex().w_full().mt_1().child(Button::new("export-settings-btn").label("Export to JSON").ghost().small()
                                                         .on_click({
@@ -5122,11 +5154,19 @@ fn main() {
     let data_dir = if own.join("history.json").exists() || !legacy.join("history.json").exists() {
         own
     } else {
-        legacy
+        legacy.clone()
     };
     std::fs::create_dir_all(&data_dir).ok();
     let path = data_dir.join("history.json");
     let settings_path = data_dir.join("settings.json");
+    let environ = suite::real_environ();
+    let home = suite::home();
+    let shared_config = suite::config_file_in(&environ, &home, suite::Relative::Home);
+    let shared_config_state = setup::config_state(&shared_config);
+    let had_user_data = path.exists()
+        || settings_path.exists()
+        || data_dir.join("workspaces.json").exists()
+        || legacy.join("history.json").exists();
 
     application().with_assets(fennec_ui::icons::FennecAssets).run(move |cx| {
         init(cx);
@@ -5134,7 +5174,7 @@ fn main() {
         let bounds = Bounds::centered(None, size(px(1400.0), px(900.0)), cx);
         
         let settings_path_clone = settings_path.clone();
-        cx.open_window(WindowOptions {
+        let (window_handle, view) = gpui_kit::open_window(WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
                 // The caption itself is hidden, but the platform still shows this
@@ -5144,19 +5184,23 @@ fn main() {
                 ..Default::default()
             }),
             ..Default::default()
-        }, |window, cx| {
+        }, cx, |window, cx| {
             let composer = cx.new(|cx| InputState::new(window, cx));
             let search = cx.new(|cx| InputState::new(window, cx));
             let br_input = cx.new(|cx| InputState::new(window, cx));
             let repo_create_input = cx.new(|cx| InputState::new(window, cx));
-            let view = cx.new(|cx| {
+            cx.new(|cx| {
                 let mut app = App::new(path, settings_path_clone.clone(), composer, search, br_input, repo_create_input, window, cx);
                 app.load();
                 app.resume_runs();
                 app
-            });
-            cx.new(|cx| Root::new(view, window, cx))
+            })
         }).expect("Failed to open window");
+        if setup::should_offer_first_run(shared_config_state, had_user_data, view.read(cx).setup_skipped) {
+            let _ = window_handle.update(cx, |_, window, cx| {
+                let _ = view.update(cx, |app, cx| app.open_setup_wizard(window, cx, true));
+            });
+        }
         
         // gpui-kit's own dark is a neutral ground with a blue accent; every
         // colour the shell draws comes from a preset, so a fresh install with no

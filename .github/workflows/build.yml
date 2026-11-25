@@ -3,7 +3,7 @@ name: build-desktop
 on:
   push:
     branches: [main]
-    tags: ["v1.0.0"]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -52,6 +52,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ matrix.rust }}
+      - name: Resolve package metadata
+        id: package
+        working-directory: fennec-desktop
+        shell: bash
+        run: |
+          VERSION="$(python -c 'import re,pathlib; print(re.search(r"^version = \"([^\"]+)\"", pathlib.Path("Cargo.toml").read_text(), re.M).group(1))')"
+          case "$RUNNER_ARCH" in
+            X64) ARCH=x86_64 ;;
+            ARM64) ARCH=aarch64 ;;
+            *) echo "unsupported RUNNER_ARCH: $RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "ASSET_ARCH=$ARCH" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "${GITHUB_REF_NAME#v}" != "$VERSION" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${VERSION}" >&2
+            exit 1
+          fi
       - name: Install windowing deps
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -64,6 +81,9 @@ jobs:
         # without the flag cargo skips that target, so the shell users actually run
         # would be built but never tested.
         run: cargo test --release --features gui
+      - name: Test packaging helpers
+        working-directory: fennec-desktop
+        run: python -m unittest discover -s packaging -p "test_*.py"
       # The `gui` feature is what users run: fennec-desktop-gui is the current
       # shell. Its release build compiles shaders with fxc.exe, which the SDK on
       # these runners provides and a bare dev box usually does not.
@@ -74,7 +94,7 @@ jobs:
         working-directory: fennec-desktop
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${VERSION}"
           mkdir -p dist
           python - "$VERSION" <<'PY'
           import os, pathlib, re, sys, tarfile, zipfile
@@ -111,26 +131,47 @@ jobs:
               raise SystemExit(f"desktop asset was not created: {asset}")
           print(asset)
           PY
+      - name: Package Windows installer
+        if: runner.os == 'Windows'
+        working-directory: fennec-desktop
+        shell: bash
+        run: python packaging/build_installer.py windows --version "$VERSION" --arch "$ASSET_ARCH" --binary target/release/fennec-desktop-gui.exe
+      - name: Package macOS disk image and installer
+        if: runner.os == 'macOS'
+        working-directory: fennec-desktop
+        shell: bash
+        run: python packaging/build_installer.py macos --version "$VERSION" --arch "$ASSET_ARCH" --binary target/release/fennec-desktop-gui
+      - name: Package Debian installer
+        if: runner.os == 'Linux'
+        working-directory: fennec-desktop
+        shell: bash
+        run: python packaging/build_installer.py linux --version "$VERSION" --arch "$ASSET_ARCH" --binary target/release/fennec-desktop-gui
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: fennec-desktop-${{ matrix.os }}
           path: fennec-desktop/dist/*
   release:
-    if: github.ref == 'refs/tags/v1.0.0'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          path: fennec-desktop
       - uses: actions/download-artifact@v4
         with:
           pattern: fennec-desktop-*
           path: dist
           merge-multiple: true
+      - name: Verify installer set
+        run: python fennec-desktop/packaging/build_installer.py validate --dist dist
       - name: Publish checksums and release assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          VERSION="${GITHUB_REF_NAME#v}"
           (cd dist && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' | sort -z | xargs -0 sha256sum > SHA256SUMS)
           python - <<'PY'
           import pathlib, re
@@ -147,5 +188,5 @@ jobs:
           if sorted(names) != assets:
               raise SystemExit("SHA256SUMS entries do not match release asset basenames")
           PY
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --notes "Fennec Desktop 1.0.0. Native Rust/GPUI build. See CHANGELOG.md for the full 0.9.0 to 1.0.0 record. Portable archives are unsigned; SAC remains off by user choice."
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --notes "Fennec Desktop ${VERSION}. Native Rust/GPUI build with Windows setup wizard, macOS disk image and installer package, and Debian package. See CHANGELOG.md for the release record. Installers are unsigned; SAC remains off by user choice."
           gh release upload "$GITHUB_REF_NAME" dist/*

@@ -8,9 +8,8 @@
 //! shows at start is therefore to put an icon group at resource ordinal 1 in
 //! the executable, which is what `build/fennec-desktop.rc` declares.
 //!
-//! The GNU toolchain this repo builds with has no `rc.exe`, so this uses the
-//! MinGW `windres` that ships beside it, and hands the resulting COFF object
-//! straight to the linker the way `embed-resource` does.
+//! The GNU toolchain uses MinGW `windres`; MSVC uses `embed-resource` to run the
+//! Windows SDK resource compiler. Both hand the resulting COFF object to the linker.
 
 use std::env;
 use std::path::PathBuf;
@@ -21,9 +20,15 @@ fn main() {
     println!("cargo:rerun-if-changed=build/icon.ico");
 
     let target = env::var("TARGET").unwrap_or_default();
-    if !cfg!(windows) || !target.contains("windows") || !target.contains("gnu") {
-        // macOS and Linux take their icon from the bundle/desktop entry, and an
-        // MSVC link would need rc.exe; neither needs (nor can take) this object.
+    if !cfg!(windows) || !target.contains("windows") {
+        // macOS and Linux take their icon from the bundle/desktop entry.
+        return;
+    }
+    if target.contains("msvc") {
+        let _ = embed_resource::compile("build/fennec-desktop.rc", embed_resource::NONE);
+        return;
+    }
+    if !target.contains("gnu") {
         return;
     }
 
@@ -56,9 +61,9 @@ fn main() {
             // rustc 1.50+ forwards this to the linker for every bin target.
             println!("cargo:rustc-link-arg-bins={}", object.display());
         }
-        Ok(s) => println!(
-            "cargo:warning=windres exited {s}: the binaries keep the default Windows icon"
-        ),
+        Ok(s) => {
+            println!("cargo:warning=windres exited {s}: the binaries keep the default Windows icon")
+        }
         Err(e) => println!(
             "cargo:warning=windres did not run ({e}): the binaries keep the default Windows icon"
         ),
