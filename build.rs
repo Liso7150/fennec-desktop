@@ -24,6 +24,7 @@ fn main() {
         // macOS and Linux take their icon from the bundle/desktop entry.
         return;
     }
+    #[cfg(windows)]
     if target.contains("msvc") {
         let _ = embed_resource::compile("build/fennec-desktop.rc", embed_resource::NONE);
         return;
