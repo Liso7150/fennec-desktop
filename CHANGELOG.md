@@ -79,7 +79,8 @@ to compile shaders.
 - Setup wizard proportions, cards, sidebar, and light primary buttons match the released
   installer reference; the Windows installer now uses custom dark Fennec pages for Welcome,
   Destination, Components, Install, and Finish, with a larger headerless layout and enlarged
-  typography instead of white MUI content pages
+  typography instead of white MUI content pages; Start menu and desktop shortcuts use an
+  installed Fennec.ico so they display the fox icon after setup
 - Fox mark replaces the shield icon, embedded in the exe via `build.rs` +
   `build/fennec-desktop.rc`
 

@@ -371,17 +371,13 @@ Section "Fennec Desktop (required)" SEC_APP
     SectionIn RO
     SetOutPath "$INSTDIR"
     File /oname=Fennec.exe "${BINARY}"
+    File /oname=Fennec.ico "${ICON}"
     CreateDirectory "$SMPROGRAMS\Fennec Desktop"
-    IfFileExists "$SMPROGRAMS\Fennec Desktop\Fennec.lnk" start_shortcut_exists
-        CreateShortCut "$SMPROGRAMS\Fennec Desktop\Fennec.lnk" "$INSTDIR\Fennec.exe" "" "$INSTDIR" 0
-        StrCpy $StartShortcutCreated "1"
-        Goto start_shortcut_done
-    start_shortcut_exists:
-        StrCpy $StartShortcutCreated "0"
-    start_shortcut_done:
+    CreateShortCut "$SMPROGRAMS\Fennec Desktop\Fennec.lnk" "$INSTDIR\Fennec.exe" "" "$INSTDIR\Fennec.ico" 0
+    StrCpy $StartShortcutCreated "1"
     ${If} $CreateShortcut == 1
         IfFileExists "$DESKTOP\Fennec.lnk" desktop_shortcut_exists
-            CreateShortCut "$DESKTOP\Fennec.lnk" "$INSTDIR\Fennec.exe" "" "$INSTDIR" 0
+            CreateShortCut "$DESKTOP\Fennec.lnk" "$INSTDIR\Fennec.exe" "" "$INSTDIR\Fennec.ico" 0
             StrCpy $DesktopShortcutCreated "1"
             Goto desktop_shortcut_done
         desktop_shortcut_exists:
@@ -396,7 +392,7 @@ Section "Fennec Desktop (required)" SEC_APP
     WriteRegDWORD HKCU "Software\Fennec Desktop" "DesktopShortcutCreated" $DesktopShortcutCreated
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\FennecDesktop" "DisplayName" "Fennec Desktop"
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\FennecDesktop" "DisplayVersion" "${VERSION}"
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\FennecDesktop" "DisplayIcon" "$INSTDIR\Fennec.exe,0"
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\FennecDesktop" "DisplayIcon" "$INSTDIR\Fennec.ico,0"
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\FennecDesktop" "UninstallString" '"$INSTDIR\Uninstall Fennec.exe"'
     WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\FennecDesktop" "NoModify" 1
     WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\FennecDesktop" "NoRepair" 1
@@ -404,6 +400,7 @@ SectionEnd
 
 Section "Uninstall"
     Delete "$INSTDIR\Fennec.exe"
+    Delete "$INSTDIR\Fennec.ico"
     Delete "$INSTDIR\Uninstall Fennec.exe"
     ReadRegDWORD $0 HKCU "Software\Fennec Desktop" "StartMenuShortcutCreated"
     ${If} $0 == ""
