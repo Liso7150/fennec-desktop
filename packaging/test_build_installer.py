@@ -49,16 +49,26 @@ class InstallerPackagingTests(unittest.TestCase):
                 build_installer.validate_release_set(root, "1.0.0")
 
 
-    def test_windows_wizard_pages_are_dark_fixed_size_assets(self):
+    def test_windows_wizard_pages_are_dark_scaled_assets(self):
         import struct
 
         pages = build_installer.ROOT / "packaging" / "windows" / "pages"
-        for name in ("welcome.bmp", "directory.bmp", "components.bmp", "finish.bmp"):
+        for name in ("welcome.bmp", "directory.bmp", "components.bmp", "install.bmp", "finish.bmp"):
             data = (pages / name).read_bytes()
             self.assertEqual(data[:2], b"BM", name)
             width, height = struct.unpack_from("<ii", data, 18)
-            self.assertEqual((width, height), (900, 500), name)
+            self.assertEqual((width, height), (900, 600), name)
         script = (build_installer.ROOT / "packaging" / "windows" / "fennec-desktop.nsi").read_text()
+        self.assertIn('SetFont "Segoe UI" 9', script)
+        self.assertIn("Function ExpandWizardWidth", script)
+        self.assertIn("Function RemoveWizardHeader", script)
+        self.assertIn("Function ExpandDialogToTop", script)
+        self.assertIn("Function ScaleChildrenWidth", script)
+        self.assertIn("Page custom InstallPage", script)
+        self.assertIn("!insertmacro MUI_PAGE_INSTFILES", script)
+        self.assertIn("Function HiddenInstFilesShow", script)
+        self.assertIn("Function HiddenInstFilesLeave", script)
+        self.assertNotIn("MUI_WIZOWIDTH", script)
         self.assertIn('!include "nsDialogs.nsh"', script)
         self.assertIn("Page custom WelcomePage", script)
         self.assertIn("Page custom DirectoryPage", script)
@@ -70,8 +80,8 @@ class InstallerPackagingTests(unittest.TestCase):
         self.assertNotIn("nsDialogs::CreateText", script)
         self.assertNotIn("nsDialogs::CreateButton", script)
         self.assertNotIn("nsDialogs::CreateCheckbox", script)
-        self.assertEqual(script.count("nsDialogs::Show"), 4)
-        self.assertEqual(script.count('${NSD_CreateBitmap} 0 0 100% 100% ""'), 4)
+        self.assertEqual(script.count("nsDialogs::Show"), 5)
+        self.assertEqual(script.count('${NSD_CreateBitmap} 0 0 100% 100% ""'), 5)
 
     def test_macos_bundle_metadata_and_executable(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -78,7 +78,8 @@ to compile shaders.
   Advanced, Integrations; Save persists font size only
 - Setup wizard proportions, cards, sidebar, and light primary buttons match the released
   installer reference; the Windows installer now uses custom dark Fennec pages for Welcome,
-  Destination, Components, and Finish instead of white MUI content pages
+  Destination, Components, Install, and Finish, with a larger headerless layout and enlarged
+  typography instead of white MUI content pages
 - Fox mark replaces the shield icon, embedded in the exe via `build.rs` +
   `build/fennec-desktop.rc`
 

@@ -110,7 +110,7 @@ def build_windows(args: argparse.Namespace) -> Path:
     numeric_version = ".".join((*match.groups(), "0"))
     source_script = ROOT / "packaging" / "windows" / "fennec-desktop.nsi"
     page_bitmaps = ROOT / "packaging" / "windows" / "pages"
-    for name in ("welcome.bmp", "directory.bmp", "components.bmp", "finish.bmp"):
+    for name in ("welcome.bmp", "directory.bmp", "components.bmp", "install.bmp", "finish.bmp"):
         require_file(page_bitmaps / name, f"installer page {name}")
     script_text = source_script.read_text(encoding="utf-8")
     marker = 'OutFile "${DOUT}"'
