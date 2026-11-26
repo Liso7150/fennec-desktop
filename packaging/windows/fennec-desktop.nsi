@@ -103,7 +103,7 @@ Function WelcomePage
     nsDialogs::Create 1018
     Pop $Dialog
     SetCtlColors $Dialog "EDEDED" "141414"
-    ${NSD_CreateBitmap} 0 0 900px 500px ""
+    ${NSD_CreateBitmap} 0 0 100% 100% ""
     Pop $ImageCtrl
     ${NSD_SetStretchedBitmap} $ImageCtrl "$PLUGINSDIR\welcome.bmp" $BmpHandle
     GetDlgItem $1 $HWNDPARENT 1
@@ -117,14 +117,14 @@ Function DirectoryPage
     nsDialogs::Create 1018
     Pop $Dialog
     SetCtlColors $Dialog "EDEDED" "141414"
-    ${NSD_CreateBitmap} 0 0 900px 500px ""
+    ${NSD_CreateBitmap} 0 0 100% 100% ""
     Pop $ImageCtrl
     ${NSD_SetStretchedBitmap} $ImageCtrl "$PLUGINSDIR\directory.bmp" $BmpHandle
-    ${NSD_CreateText} 250px 214px 460px 38px "$INSTDIR"
+    ${NSD_CreateText} 28% 43% 51% 38px "$INSTDIR"
     Pop $PathInput
     SetCtlColors $PathInput "EDEDED" "1F1F1F"
     ${NSD_OnChange} $PathInput SavePath
-    ${NSD_CreateButton} 730px 214px 100px 38px "Browse..."
+    ${NSD_CreateButton} 81% 43% 11% 38px "Browse..."
     Pop $BrowseButton
     SetCtlColors $BrowseButton "141414" "EDEDED"
     ${NSD_OnClick} $BrowseButton BrowseFolder
@@ -153,15 +153,15 @@ Function ComponentsPage
     nsDialogs::Create 1018
     Pop $Dialog
     SetCtlColors $Dialog "EDEDED" "141414"
-    ${NSD_CreateBitmap} 0 0 900px 500px ""
+    ${NSD_CreateBitmap} 0 0 100% 100% ""
     Pop $ImageCtrl
     ${NSD_SetStretchedBitmap} $ImageCtrl "$PLUGINSDIR\components.bmp" $BmpHandle
-    ${NSD_CreateCheckBox} 250px 236px 560px 26px "Fennec Desktop (required)"
+        ${NSD_CreateCheckBox} 28% 47% 62% 26px "Fennec Desktop (required)"
     Pop $0
     ${NSD_Check} $0
     EnableWindow $0 0
     SetCtlColors $0 "EDEDED" "25282D"
-    ${NSD_CreateCheckBox} 250px 274px 560px 26px "Desktop shortcut"
+        ${NSD_CreateCheckBox} 28% 55% 62% 26px "Desktop shortcut"
     Pop $ShortcutCheck
     ${NSD_Check} $ShortcutCheck
     SetCtlColors $ShortcutCheck "EDEDED" "25282D"
@@ -181,7 +181,7 @@ Function FinishPage
     nsDialogs::Create 1018
     Pop $Dialog
     SetCtlColors $Dialog "EDEDED" "141414"
-    ${NSD_CreateBitmap} 0 0 900px 500px ""
+    ${NSD_CreateBitmap} 0 0 100% 100% ""
     Pop $ImageCtrl
     ${NSD_SetStretchedBitmap} $ImageCtrl "$PLUGINSDIR\finish.bmp" $BmpHandle
     GetDlgItem $1 $HWNDPARENT 1

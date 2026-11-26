@@ -71,6 +71,7 @@ class InstallerPackagingTests(unittest.TestCase):
         self.assertNotIn("nsDialogs::CreateButton", script)
         self.assertNotIn("nsDialogs::CreateCheckbox", script)
         self.assertEqual(script.count("nsDialogs::Show"), 4)
+        self.assertEqual(script.count('${NSD_CreateBitmap} 0 0 100% 100% ""'), 4)
 
     def test_macos_bundle_metadata_and_executable(self):
         with tempfile.TemporaryDirectory() as directory:
