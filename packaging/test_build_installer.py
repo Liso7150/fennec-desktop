@@ -66,6 +66,8 @@ class InstallerPackagingTests(unittest.TestCase):
         self.assertIn("Page custom FinishPage", script)
         self.assertNotIn("FindWindowEx $3", script)
         self.assertNotIn("MUI_UNLANGUAGE", script)
+        self.assertNotIn("nsDialogs::CreateBitmap", script)
+        self.assertEqual(script.count("nsDialogs::Show"), 4)
 
     def test_macos_bundle_metadata_and_executable(self):
         with tempfile.TemporaryDirectory() as directory:

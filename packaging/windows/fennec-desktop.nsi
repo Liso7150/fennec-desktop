@@ -43,6 +43,8 @@ Var PathInput
 Var BrowseButton
 Var ShortcutCheck
 Var CreateShortcut
+Var ImageCtrl
+Var BmpHandle
 
 Page custom WelcomePage
 Page custom DirectoryPage
@@ -101,19 +103,23 @@ Function WelcomePage
     nsDialogs::Create 1018
     Pop $Dialog
     SetCtlColors $Dialog "EDEDED" "141414"
-    nsDialogs::CreateBitmap 0 0 900px 500px "$PLUGINSDIR\welcome.bmp"
-    Pop $0
+    ${NSD_CreateBitmap} 0 0 900px 500px ""
+    Pop $ImageCtrl
+    ${NSD_SetStretchedBitmap} $ImageCtrl "$PLUGINSDIR\welcome.bmp" $BmpHandle
     GetDlgItem $1 $HWNDPARENT 1
     SendMessage $1 ${WM_SETTEXT} 0 "STR:Get started"
     SetCtlColors $1 "141414" "EDEDED"
+    nsDialogs::Show
+    ${NSD_FreeBitmap} $BmpHandle
 FunctionEnd
 
 Function DirectoryPage
     nsDialogs::Create 1018
     Pop $Dialog
     SetCtlColors $Dialog "EDEDED" "141414"
-    nsDialogs::CreateBitmap 0 0 900px 500px "$PLUGINSDIR\directory.bmp"
-    Pop $0
+    ${NSD_CreateBitmap} 0 0 900px 500px ""
+    Pop $ImageCtrl
+    ${NSD_SetStretchedBitmap} $ImageCtrl "$PLUGINSDIR\directory.bmp" $BmpHandle
     nsDialogs::CreateText 250px 214px 460px 38px "$INSTDIR"
     Pop $PathInput
     SetCtlColors $PathInput "EDEDED" "1F1F1F"
@@ -124,6 +130,8 @@ Function DirectoryPage
     ${NSD_OnClick} $BrowseButton BrowseFolder
     GetDlgItem $1 $HWNDPARENT 1
     SendMessage $1 ${WM_SETTEXT} 0 "STR:Next >"
+    nsDialogs::Show
+    ${NSD_FreeBitmap} $BmpHandle
 FunctionEnd
 
 Function SavePath
@@ -145,8 +153,9 @@ Function ComponentsPage
     nsDialogs::Create 1018
     Pop $Dialog
     SetCtlColors $Dialog "EDEDED" "141414"
-    nsDialogs::CreateBitmap 0 0 900px 500px "$PLUGINSDIR\components.bmp"
-    Pop $0
+    ${NSD_CreateBitmap} 0 0 900px 500px ""
+    Pop $ImageCtrl
+    ${NSD_SetStretchedBitmap} $ImageCtrl "$PLUGINSDIR\components.bmp" $BmpHandle
     nsDialogs::CreateCheckbox 250px 236px 560px 26px "Fennec Desktop (required)"
     Pop $0
     ${NSD_Check} $0
@@ -160,6 +169,8 @@ Function ComponentsPage
     GetDlgItem $1 $HWNDPARENT 1
     SendMessage $1 ${WM_SETTEXT} 0 "STR:Install"
     SetCtlColors $1 "141414" "EDEDED"
+    nsDialogs::Show
+    ${NSD_FreeBitmap} $BmpHandle
 FunctionEnd
 
 Function SaveShortcut
@@ -170,13 +181,16 @@ Function FinishPage
     nsDialogs::Create 1018
     Pop $Dialog
     SetCtlColors $Dialog "EDEDED" "141414"
-    nsDialogs::CreateBitmap 0 0 900px 500px "$PLUGINSDIR\finish.bmp"
-    Pop $0
+    ${NSD_CreateBitmap} 0 0 900px 500px ""
+    Pop $ImageCtrl
+    ${NSD_SetStretchedBitmap} $ImageCtrl "$PLUGINSDIR\finish.bmp" $BmpHandle
     GetDlgItem $1 $HWNDPARENT 1
     SendMessage $1 ${WM_SETTEXT} 0 "STR:Close"
     SetCtlColors $1 "141414" "EDEDED"
     GetDlgItem $1 $HWNDPARENT 3
     EnableWindow $1 0
+    nsDialogs::Show
+    ${NSD_FreeBitmap} $BmpHandle
 FunctionEnd
 
 Section "Fennec Desktop (required)" SEC_APP
