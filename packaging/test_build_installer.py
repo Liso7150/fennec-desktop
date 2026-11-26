@@ -64,6 +64,8 @@ class InstallerPackagingTests(unittest.TestCase):
         self.assertIn("Page custom DirectoryPage", script)
         self.assertIn("Page custom ComponentsPage", script)
         self.assertIn("Page custom FinishPage", script)
+        self.assertNotIn("FindWindowEx $3", script)
+        self.assertNotIn("MUI_UNLANGUAGE", script)
 
     def test_macos_bundle_metadata_and_executable(self):
         with tempfile.TemporaryDirectory() as directory:

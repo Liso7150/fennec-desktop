@@ -49,10 +49,9 @@ Page custom DirectoryPage
 Page custom ComponentsPage
 !insertmacro MUI_PAGE_INSTFILES
 Page custom FinishPage
-!insertmacro MUI_LANGUAGE "English"
-
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "English"
 
 Function .onInit
     SetShellVarContext current
@@ -80,7 +79,7 @@ Function ColorizeChildren
     Pop $1
     StrCpy $2 0
 children_loop:
-    FindWindowEx $3 $1 "" "" $2
+    System::Call 'user32::FindWindowEx(p $1, p $2, w 0, w 0) p .r3'
     StrCmp $3 0 children_done
     SetCtlColors $3 "EDEDED" "141414"
     StrCpy $2 $3
