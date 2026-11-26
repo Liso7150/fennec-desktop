@@ -53,7 +53,6 @@ Page custom FinishPage
 
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
-!insertmacro MUI_UNLANGUAGE "English"
 
 Function .onInit
     SetShellVarContext current
