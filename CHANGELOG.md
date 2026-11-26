@@ -77,8 +77,8 @@ to compile shaders.
   agent endpoints are loopback-only), leaving Appearance, GitHub, Obsidian, Behavior,
   Advanced, Integrations; Save persists font size only
 - Setup wizard proportions, cards, sidebar, and light primary buttons match the released
-  installer reference; the Windows NSIS welcome page uses the same Fennec copy and dark
-  branding
+  installer reference; the Windows installer now uses custom dark Fennec pages for Welcome,
+  Destination, Components, and Finish instead of white MUI content pages
 - Fox mark replaces the shield icon, embedded in the exe via `build.rs` +
   `build/fennec-desktop.rc`
 

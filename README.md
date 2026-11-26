@@ -58,7 +58,7 @@ The debug binary is `target/debug/fennec-desktop-gui` (`.exe` on Windows). Windo
 
 The release workflow builds three native installers alongside the portable archives:
 
-- **Windows:** `FennecDesktop-<version>-windows-<arch>-setup.exe`, a per-user NSIS wizard with install-folder, shortcut, install, and launch steps.
+- **Windows:** `FennecDesktop-<version>-windows-<arch>-setup.exe`, a per-user NSIS wizard with custom dark Fennec Welcome, Destination, Components, Install, and Finish pages.
 - **macOS:** `FennecDesktop-<version>-macos-<arch>.dmg`, containing `Fennec.app`, an `Install Fennec.pkg` installer wizard, and an Applications shortcut.
 - **Linux:** `FennecDesktop-<version>-linux-<arch>.deb`, with a desktop entry, application icon, and `/usr/bin/fennec-desktop` launcher.
 

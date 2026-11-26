@@ -109,6 +109,9 @@ def build_windows(args: argparse.Namespace) -> Path:
         raise PackagingError(f"cannot derive Windows version resource from {version!r}")
     numeric_version = ".".join((*match.groups(), "0"))
     source_script = ROOT / "packaging" / "windows" / "fennec-desktop.nsi"
+    page_bitmaps = ROOT / "packaging" / "windows" / "pages"
+    for name in ("welcome.bmp", "directory.bmp", "components.bmp", "finish.bmp"):
+        require_file(page_bitmaps / name, f"installer page {name}")
     script_text = source_script.read_text(encoding="utf-8")
     marker = 'OutFile "${DOUT}"'
     if marker not in script_text:
@@ -125,6 +128,7 @@ def build_windows(args: argparse.Namespace) -> Path:
         f"/DICON={ROOT / 'build' / 'icon.ico'}",
         f"/DWELCOME_BITMAP={ROOT / 'packaging' / 'windows' / 'welcome.bmp'}",
         f"/DHEADER_BITMAP={ROOT / 'packaging' / 'windows' / 'header.bmp'}",
+        f"/DPAGE_BITMAPS={page_bitmaps}",
         str(script),
     ]
     try:

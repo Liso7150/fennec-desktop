@@ -49,6 +49,22 @@ class InstallerPackagingTests(unittest.TestCase):
                 build_installer.validate_release_set(root, "1.0.0")
 
 
+    def test_windows_wizard_pages_are_dark_fixed_size_assets(self):
+        import struct
+
+        pages = build_installer.ROOT / "packaging" / "windows" / "pages"
+        for name in ("welcome.bmp", "directory.bmp", "components.bmp", "finish.bmp"):
+            data = (pages / name).read_bytes()
+            self.assertEqual(data[:2], b"BM", name)
+            width, height = struct.unpack_from("<ii", data, 18)
+            self.assertEqual((width, height), (900, 500), name)
+        script = (build_installer.ROOT / "packaging" / "windows" / "fennec-desktop.nsi").read_text()
+        self.assertIn('!include "nsDialogs.nsh"', script)
+        self.assertIn("Page custom WelcomePage", script)
+        self.assertIn("Page custom DirectoryPage", script)
+        self.assertIn("Page custom ComponentsPage", script)
+        self.assertIn("Page custom FinishPage", script)
+
     def test_macos_bundle_metadata_and_executable(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
