@@ -61,6 +61,8 @@ Var HeaderFont
 Var SubHeaderFont
 Var InstallOverlayCtrl
 Var InstallOverlayBmp
+Var StartShortcutCreated
+Var DesktopShortcutCreated
 
 Page custom WelcomePage
 Page custom DirectoryPage
@@ -75,6 +77,8 @@ Page custom FinishPage
 Function .onInit
     SetShellVarContext current
     StrCpy $CreateShortcut "1"
+    StrCpy $StartShortcutCreated "0"
+    StrCpy $DesktopShortcutCreated "0"
     InitPluginsDir
     SetOutPath $PLUGINSDIR
     File "${PAGE_BITMAPS}\welcome.bmp"
@@ -293,7 +297,6 @@ Function BrowseFolder
 FunctionEnd
 
 Function ComponentsPage
-    ${NSD_GetText} $PathInput $INSTDIR
     nsDialogs::Create 1018
     Pop $Dialog
     Push $Dialog
@@ -311,7 +314,11 @@ Function ComponentsPage
         ${NSD_CreateCheckBox} 30% 61% 60% 36px "Desktop shortcut"
     Pop $ShortcutCheck
     SendMessage $ShortcutCheck ${WM_SETFONT} $ControlFont 1
-    ${NSD_Check} $ShortcutCheck
+    ${If} $CreateShortcut == 1
+        ${NSD_Check} $ShortcutCheck
+    ${Else}
+        ${NSD_Uncheck} $ShortcutCheck
+    ${EndIf}
     SetCtlColors $ShortcutCheck "EDEDED" "25282D"
     ${NSD_OnClick} $ShortcutCheck SaveShortcut
     System::Call 'user32::SetWindowPos(p $ImageCtrl, p 1, i 0, i 0, i 0, i 0, i 0x13)'
@@ -365,12 +372,28 @@ Section "Fennec Desktop (required)" SEC_APP
     SetOutPath "$INSTDIR"
     File /oname=Fennec.exe "${BINARY}"
     CreateDirectory "$SMPROGRAMS\Fennec Desktop"
-    CreateShortCut "$SMPROGRAMS\Fennec Desktop\Fennec.lnk" "$INSTDIR\Fennec.exe" "" "$INSTDIR" 0
+    IfFileExists "$SMPROGRAMS\Fennec Desktop\Fennec.lnk" start_shortcut_exists
+        CreateShortCut "$SMPROGRAMS\Fennec Desktop\Fennec.lnk" "$INSTDIR\Fennec.exe" "" "$INSTDIR" 0
+        StrCpy $StartShortcutCreated "1"
+        Goto start_shortcut_done
+    start_shortcut_exists:
+        StrCpy $StartShortcutCreated "0"
+    start_shortcut_done:
     ${If} $CreateShortcut == 1
-        CreateShortCut "$DESKTOP\Fennec.lnk" "$INSTDIR\Fennec.exe" "" "$INSTDIR" 0
+        IfFileExists "$DESKTOP\Fennec.lnk" desktop_shortcut_exists
+            CreateShortCut "$DESKTOP\Fennec.lnk" "$INSTDIR\Fennec.exe" "" "$INSTDIR" 0
+            StrCpy $DesktopShortcutCreated "1"
+            Goto desktop_shortcut_done
+        desktop_shortcut_exists:
+            StrCpy $DesktopShortcutCreated "0"
+        desktop_shortcut_done:
+    ${Else}
+        StrCpy $DesktopShortcutCreated "0"
     ${EndIf}
     WriteUninstaller "$INSTDIR\Uninstall Fennec.exe"
     WriteRegStr HKCU "Software\Fennec Desktop" "InstallDir" "$INSTDIR"
+    WriteRegDWORD HKCU "Software\Fennec Desktop" "StartMenuShortcutCreated" $StartShortcutCreated
+    WriteRegDWORD HKCU "Software\Fennec Desktop" "DesktopShortcutCreated" $DesktopShortcutCreated
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\FennecDesktop" "DisplayName" "Fennec Desktop"
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\FennecDesktop" "DisplayVersion" "${VERSION}"
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\FennecDesktop" "DisplayIcon" "$INSTDIR\Fennec.exe,0"
@@ -382,8 +405,20 @@ SectionEnd
 Section "Uninstall"
     Delete "$INSTDIR\Fennec.exe"
     Delete "$INSTDIR\Uninstall Fennec.exe"
-    Delete "$SMPROGRAMS\Fennec Desktop\Fennec.lnk"
-    Delete "$DESKTOP\Fennec.lnk"
+    ReadRegDWORD $0 HKCU "Software\Fennec Desktop" "StartMenuShortcutCreated"
+    ${If} $0 == ""
+        StrCpy $0 0
+    ${EndIf}
+    ${If} $0 == 1
+        Delete "$SMPROGRAMS\Fennec Desktop\Fennec.lnk"
+    ${EndIf}
+    ReadRegDWORD $0 HKCU "Software\Fennec Desktop" "DesktopShortcutCreated"
+    ${If} $0 == ""
+        StrCpy $0 0
+    ${EndIf}
+    ${If} $0 == 1
+        Delete "$DESKTOP\Fennec.lnk"
+    ${EndIf}
     RMDir "$SMPROGRAMS\Fennec Desktop"
     RMDir "$INSTDIR"
     DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\FennecDesktop"
