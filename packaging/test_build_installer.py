@@ -67,6 +67,9 @@ class InstallerPackagingTests(unittest.TestCase):
         self.assertNotIn("FindWindowEx $3", script)
         self.assertNotIn("MUI_UNLANGUAGE", script)
         self.assertNotIn("nsDialogs::CreateBitmap", script)
+        self.assertNotIn("nsDialogs::CreateText", script)
+        self.assertNotIn("nsDialogs::CreateButton", script)
+        self.assertNotIn("nsDialogs::CreateCheckbox", script)
         self.assertEqual(script.count("nsDialogs::Show"), 4)
 
     def test_macos_bundle_metadata_and_executable(self):

@@ -120,11 +120,11 @@ Function DirectoryPage
     ${NSD_CreateBitmap} 0 0 900px 500px ""
     Pop $ImageCtrl
     ${NSD_SetStretchedBitmap} $ImageCtrl "$PLUGINSDIR\directory.bmp" $BmpHandle
-    nsDialogs::CreateText 250px 214px 460px 38px "$INSTDIR"
+    ${NSD_CreateText} 250px 214px 460px 38px "$INSTDIR"
     Pop $PathInput
     SetCtlColors $PathInput "EDEDED" "1F1F1F"
     ${NSD_OnChange} $PathInput SavePath
-    nsDialogs::CreateButton 730px 214px 100px 38px "Browse..."
+    ${NSD_CreateButton} 730px 214px 100px 38px "Browse..."
     Pop $BrowseButton
     SetCtlColors $BrowseButton "141414" "EDEDED"
     ${NSD_OnClick} $BrowseButton BrowseFolder
@@ -156,12 +156,12 @@ Function ComponentsPage
     ${NSD_CreateBitmap} 0 0 900px 500px ""
     Pop $ImageCtrl
     ${NSD_SetStretchedBitmap} $ImageCtrl "$PLUGINSDIR\components.bmp" $BmpHandle
-    nsDialogs::CreateCheckbox 250px 236px 560px 26px "Fennec Desktop (required)"
+    ${NSD_CreateCheckBox} 250px 236px 560px 26px "Fennec Desktop (required)"
     Pop $0
     ${NSD_Check} $0
     EnableWindow $0 0
     SetCtlColors $0 "EDEDED" "25282D"
-    nsDialogs::CreateCheckbox 250px 274px 560px 26px "Desktop shortcut"
+    ${NSD_CreateCheckBox} 250px 274px 560px 26px "Desktop shortcut"
     Pop $ShortcutCheck
     ${NSD_Check} $ShortcutCheck
     SetCtlColors $ShortcutCheck "EDEDED" "25282D"
