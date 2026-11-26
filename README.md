@@ -76,7 +76,7 @@ Then launch `fennec-desktop-gui`. Core starts the Fennec engine on demand. The o
 
 A fresh profile offers the native setup wizard when neither a shared Fennec configuration nor earlier desktop data exists. Existing users are not blocked; rerun it from **Settings → Advanced → Run Setup Wizard**.
 
-The wizard checks Python 3.10+, Git, Rust/Cargo, core Python dependencies, the built Fennec engine, and `fennec-core/setup_wizard.py`. It follows the system light/dark theme while open and restores the selected app theme on close. It offers explicit `winget` actions on Windows and Homebrew actions on macOS when those package managers are available; Linux shows manual package-manager commands. Engine, suite, model, and cache folders have native folder pickers.
+The wizard checks Python 3.10+, Git, Rust/Cargo, core Python dependencies, the built Fennec engine, and `fennec-core/setup_wizard.py`. It follows the system light/dark theme while open and restores the selected app theme on close. Its dark sidebar, content cards, and light primary buttons match the Fennec installer reference. It offers explicit `winget` actions on Windows and Homebrew actions on macOS when those package managers are available; Linux shows manual package-manager commands. Engine, suite, model, and cache folders have native folder pickers.
 
 Model scanning uses the core classifier. Select a ready local checkpoint or opt into the recommended `Liso/qwen36-35b-colibri` Fennec-ready int4 download (22.78 GiB). Finish invokes the core setup helper with argument arrays, writes the shared configuration atomically, and backs up an existing file. Secrets remain in environment variables. **Not now** dismisses first-run setup for that desktop profile without writing the shared configuration.
 

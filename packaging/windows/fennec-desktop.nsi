@@ -16,8 +16,8 @@ SetCompressor /FINAL /SOLID lzma
 !define MUI_ABORTWARNING
 !define MUI_ICON "${ICON}"
 !define MUI_UNICON "${ICON}"
-!define MUI_WELCOMEPAGE_TITLE "Welcome to Fennec Desktop Setup"
-!define MUI_WELCOMEPAGE_TEXT "Install Fennec Desktop in a folder you choose.$\r$\n$\r$\nOn first launch, Fennec opens its local setup wizard.$\r$\nPrerequisites, folders, and model selection stay on this machine."
+!define MUI_WELCOMEPAGE_TITLE "Welcome to Fennec"
+!define MUI_WELCOMEPAGE_TEXT "Set up the local engine, coding service, and model folder in one pass. Fennec stays on this machine; nothing is uploaded.$\r$\n$\r$\nThis installer places Fennec Desktop on your PC. On first launch, the setup wizard checks Python, Git, Rust, the built Fennec engine, core dependencies, and your model folder."
 !define MUI_DIRECTORYPAGE_TEXT_TOP "Choose where Fennec should live.$\r$\nUse Browse to pick another folder."
 !define MUI_COMPONENTSPAGE_TEXT_TOP "Fennec Desktop is required.$\r$\nAdd a desktop shortcut if you want one."
 !define MUI_FINISHPAGE_TITLE "Fennec is ready"

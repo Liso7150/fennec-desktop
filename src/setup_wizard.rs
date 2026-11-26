@@ -72,6 +72,13 @@ impl WizardInputs {
     }
 }
 
+fn apply_setup_button_theme(cx: &mut gpui_kit::App) {
+    Theme::update(cx, |theme| {
+        theme.colors.button_primary = theme.colors.foreground;
+        theme.colors.button_primary_foreground = theme.colors.background;
+    });
+}
+
 impl App {
     pub fn open_setup_wizard(
         &mut self,
@@ -88,10 +95,12 @@ impl App {
         self.setup = Some(state.clone());
         self.setup_system_theme = true;
         Theme::change(ThemeMode::from(cx.window_appearance()), None, cx);
+        apply_setup_button_theme(cx);
         self.setup_appearance_subscription =
             Some(cx.observe_window_appearance(window, |app, _, cx| {
                 if app.setup_system_theme {
                     Theme::change(ThemeMode::from(cx.window_appearance()), None, cx);
+                    apply_setup_button_theme(cx);
                 }
             }));
         let inputs = WizardInputs::new(&state.borrow().draft, window, cx);
@@ -105,20 +114,20 @@ impl App {
             let inputs = dialog_inputs.clone();
             let weak = weak.clone();
             dialog
-                .w(px(820.0))
+                .w(px(900.0))
                 .title("Fennec Setup")
                 .entrance(gpui_kit::component::dialog::DialogEntrance::None)
                 .content(move |content, window, cx| {
                     let snapshot = state.borrow().clone();
                     let t = cx.theme().clone();
                     content
-                        .w(px(788.0))
-                        .min_h(px(470.0))
+                        .w(px(858.0))
+                        .min_h(px(560.0))
                         .flex()
                         .flex_row()
                         .child(
                             div()
-                                .w(px(164.0))
+                                .w(px(190.0))
                                 .flex_shrink_0()
                                 .p_3()
                                 .border_r_1()
@@ -449,9 +458,9 @@ fn render_step(
     let t = cx.theme().clone();
     match snapshot.step {
         WizardStep::Welcome => div().flex().flex_col().gap_4()
-            .child(Label::new("Welcome to Fennec").font_weight(FontWeight::SEMIBOLD).text_size(px(24.0)).text_color(t.foreground))
+            .child(Label::new("Welcome to Fennec").font_weight(FontWeight::SEMIBOLD).text_size(px(26.0)).text_color(t.foreground))
             .child(Label::new("Set up the local engine, coding service, and model folder in one pass. Fennec stays on this machine; nothing is uploaded.")
-                .w(px(560.0)).text_size(px(14.0)).text_color(t.muted_foreground))
+                .w(px(620.0)).text_size(px(14.0)).text_color(t.muted_foreground))
             .child(info_card("setup-welcome-changes", "What setup changes", "Setup checks Python, Git, Rust, the built Fennec engine, core dependencies, and your model folder. Finish writes ~/.fennec/config.json and backs up an existing file.", &t))
             .child(info_card("setup-welcome-installs", "Safe installs", "Package-manager actions run only after you click them. Linux commands are shown for you to run because they may need administrator rights.", &t)),
         WizardStep::Prerequisites => render_prerequisites(snapshot, inputs, state, weak, window, &t),
@@ -464,7 +473,7 @@ fn render_step(
 fn info_card(id: &'static str, title: &str, body: &str, theme: &Theme) -> Stateful<Div> {
     div()
         .id(ElementId::Name(id.into()))
-        .w(px(560.0))
+        .w(px(620.0))
         .p_3()
         .rounded_lg()
         .bg(theme.muted)
@@ -495,7 +504,7 @@ fn status_row(id: &'static str, label: &str, status: &ToolStatus, theme: &Theme)
     };
     div()
         .id(ElementId::Name(id.into()))
-        .w(px(560.0))
+        .w(px(620.0))
         .p_3()
         .rounded_lg()
         .bg(theme.muted)
@@ -623,7 +632,7 @@ fn render_prerequisites(
                     ))
                     .child(
                         Label::new(setup::manual_install_hint(system, tool))
-                            .w(px(560.0))
+                            .w(px(620.0))
                             .text_size(px(11.0))
                             .text_color(theme.muted_foreground),
                     ),
@@ -760,7 +769,7 @@ fn render_models(
     let mut column = div().flex().flex_col().gap_3()
         .child(Label::new("Choose a model").font_weight(FontWeight::SEMIBOLD).text_size(px(20.0)).text_color(theme.foreground))
         .child(Label::new("Select a ready local model, enter a path, or download the recommended Fennec-ready int4 checkpoint.")
-            .w(px(560.0)).text_size(px(12.0)).text_color(theme.muted_foreground));
+            .w(px(620.0)).text_size(px(12.0)).text_color(theme.muted_foreground));
     if snapshot.models.is_empty() {
         column = column.child(info_card("setup-no-models", "No local models found", "The scan uses fennec-core's model classifier. You can still enter a model path or download the recommended checkpoint.", theme));
     }
@@ -773,7 +782,7 @@ fn render_models(
         let theme = theme.clone();
         column = column.child(
             Button::new(format!("setup-model-{index}"))
-                .w(px(560.0))
+                .w(px(620.0))
                 .justify_start()
                 .ghost()
                 .when(selected, |button| {
@@ -830,7 +839,7 @@ fn render_models(
         theme,
     ));
     let download_state = state.clone();
-    column = column.child(div().w(px(560.0)).p_3().rounded_lg().bg(theme.muted).border_1().border_color(theme.border)
+    column = column.child(div().w(px(620.0)).p_3().rounded_lg().bg(theme.muted).border_1().border_color(theme.border)
         .flex().items_center().justify_between().gap_3()
         .child(div().flex_1().flex().flex_col().gap_1()
             .child(Label::new("Download the recommended model").font_weight(FontWeight::SEMIBOLD).text_size(px(13.0)).text_color(theme.foreground))
@@ -882,7 +891,7 @@ fn render_review(snapshot: &WizardState, theme: &Theme) -> Div {
         column = column.child(
             div()
                 .id(ElementId::Name(format!("setup-review-{label}").into()))
-                .w(px(560.0))
+                .w(px(620.0))
                 .flex()
                 .justify_between()
                 .gap_3()
@@ -924,7 +933,7 @@ fn render_logs(snapshot: &WizardState, theme: &Theme) -> AnyElement {
         lines.push(snapshot.message.clone());
     }
     div()
-        .w(px(560.0))
+        .w(px(620.0))
         .max_h(px(150.0))
         .overflow_y_scrollbar()
         .p_2()
@@ -1026,7 +1035,7 @@ fn render_navigation(
         );
     }
     div()
-        .w(px(560.0))
+        .w(px(620.0))
         .flex()
         .justify_between()
         .items_center()
@@ -1043,7 +1052,7 @@ fn path_field(
 ) -> Stateful<Div> {
     let mut row = div()
         .id(ElementId::Name(id.into()))
-        .w(px(560.0))
+        .w(px(620.0))
         .flex()
         .flex_col()
         .gap_2()
